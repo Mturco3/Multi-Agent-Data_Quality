@@ -1,27 +1,13 @@
-# Data folders
-
-
-# Environment files
-.env
-*.env
-!env.example
-
-# Python cache
 __pycache__/
 *.py[cod]
-*$py.class
-
-# Jupyter Notebook checkpoints
-.ipynb_checkpoints
-
-# Virtual environments
-venv/
 .venv/
-ML Project/
 
-# VS Code settings
-.vscode/
+.env
+.logfire/
+**/.validation_cache/
+**/.cleaning_cache/
 
-# OS files
-.DS_Store
-Thumbs.db
+Resources/
+
+visualize_dataflow.py
+visualize_results.py

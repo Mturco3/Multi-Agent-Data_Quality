@@ -1,545 +1,773 @@
-# NoiPA Data Quality — Multi-Agent System
+# NoiPA: Multi-Agent System for Data Quality
 
-A hierarchical LangGraph pipeline that autonomously inspects and cleans any CSV dataset.
-Built for the **LUISS × Reply** university project (2026), originally targeting Italian Public Administration (NoiPA) payroll data.
+**Team members:** Michele Turco, Mattia Sebastiani, Sofia Bruni
 
----
+This repository documents a project developed for the Machine Learning course for the academic year 2025/2026 in collaboration with Reply. The project studies how a **multi-agent system** can be used to inspect heterogeneous tabular data, identify several families of data-quality problems, apply controlled cleaning actions only where those actions are justified, and finally produce a report that explains both the detected issues and the effect of the remediation process. The system is specifically **tailored to public-sector tabular data**, especially administrative and payroll-related datasets in which structured fields, repeated codes, duplicate records, and heterogeneous formatting conventions are common.
 
-## Table of Contents
+The **central idea** is that data quality should not be treated as a single undifferentiated task. Missing values, placeholder abuse, inconsistent formats, duplicate structures, suspicious anomalies, and cross-column contradictions are different problems and require different forms of evidence and different intervention policies.
 
-1. [Quick Start](#quick-start)
-2. [What the System Does](#what-the-system-does)
-3. [High-Level Architecture](#high-level-architecture)
-4. [Pipeline Execution Flow](#pipeline-execution-flow)
-5. [State Management](#state-management)
-6. [Team-by-Team Breakdown](#team-by-team-breakdown)
-   - [Team 1 — Schema Validation](#team-1--schema-validation)
-   - [Team 2 — Completeness Analysis](#team-2--completeness-analysis)
-   - [Team 3 — Consistency Validation](#team-3--consistency-validation)
-   - [Team 4 — Anomaly Detection](#team-4--anomaly-detection)
-   - [Team 5 — Remediation & Reliability](#team-5--remediation--reliability)
-7. [Tools Reference](#tools-reference)
-8. [Fix Functions Reference](#fix-functions-reference)
-9. [Scoring Formula](#scoring-formula)
-10. [Output Files](#output-files)
-11. [File Structure](#file-structure)
-12. [LLM Configuration](#llm-configuration)
+## 1. Introduction
 
----
+### 1.1 Project Context and Institutional Setting
 
-## Quick Start
+The project originates from a **data-quality scenario inspired by NoiPA**, the digital platform of the Italian Ministry of Economy and Finance that manages administrative and payroll-related data for employees of the Italian Public Administration. In this setting, **data** may arrive from **different sources** and in **different formats**, such as CSV files, JSON exports, or database extracts. Even when the information is present, it may **not be immediately reliable** for analysis or downstream processing, because the same concept can be encoded in inconsistent ways across rows, columns, or files.
+
+This kind of context is particularly suitable for a data-quality project because the **main difficulty** is not the lack of data alone, but the **gap** between **availability and usability**. A dataset may look populated while still being difficult to trust. Dates can appear in several incompatible formats within the same column. Columns may contain numeric values mixed with textual decorations. Placeholder tokens may hide missingness behind apparently non-null strings. Distinct columns may duplicate one another semantically or contradict one another logically. If these issues are not isolated carefully, **later analysis inherits uncertainty** that is often **invisible at first sight**.
+
+### 1.2 Problem Statement
+
+The problem addressed by the project is therefore broader than simple data cleaning. The **task** is to **design a system** that can receive a raw dataset, inspect it systematically, **understand which quality issues are actually present**, decide which **actions are safe to perform automatically**, **generate constrained transformations** when normalization is justified, and **verify that the transformations** improved the data instead of damaging it.
+
+This **distinction** is essential. A **generic instruction** such as "clean this CSV" can easily **produce outputs** that look **plausible but are difficult to justify**. It may become unclear which evidence supported a change, whether valid values were accidentally rewritten, whether the transformation was appropriate for the semantic meaning of the column, and whether the resulting dataset is genuinely better than the original one. For a project that aims to be auditable and reliable, **this level of opacity is not acceptable**.
+
+### 1.3 Why This Project Is Strong: Core Contribution and Objective
+
+The **objective** of the project is to build a **multi-agent workflow** that receives a raw tabular dataset and produces **two main outcomes**. The **first outcome** is a **cleaned dataset** produced through controlled and verifiable actions. The **second outcome** is a **structured quality report** describing the issues detected in the original data, the actions selected for remediation, and the extent to which those actions improved the dataset after verification.
+
+The **practical goal** is straightforward: take a messy CSV file, clean it, and produce a report explaining what was wrong and what was fixed. Something you can actually hand to someone and use. The **methodological goal** is about **how you do it**. The point is not just to get a clean file. It is to show that there is a right and a wrong way to use AI agents for this kind of task. The wrong way is to simply ask an LLM to fix the data and trust whatever it gives back. The right way is to keep the AI on a short leash: let deterministic code do the measuring and profiling, force the AI to produce structured outputs that can be checked, make it write cleaning code that gets tested automatically before anything is applied to the real data.
+
+So the deeper claim the project is making is this: the **pipeline design itself** is the **contribution**. The fact that **it works is not just lucky**. It works because of **specific choices about where to use AI and where not to**, and what checks to put in place at every step.
+
+The **agentic approach is not an optional addition** to this design. It is what makes the design feasible. Some parts of the workflow inherently require **structured interpretation** that deterministic rules cannot supply: inferring a canonical dtype from a noisy column profile, writing a narrow normalization function for a specific pattern, or producing a concise structured summary of heterogeneous findings. These are tasks where an LLM, when properly bounded, contributes something that static code cannot replicate. At the same time, the **agentic components are never standalone**. Profiling parse rates, counting placeholder values, detecting duplicate patterns, or comparing columns are performed by Python before any model is involved. The agent receives **distilled evidence, not raw data**, and its output is always verified by the host environment before it is trusted. The result is a **staged multi-agent architecture** in which each agent answers a specific question, produces a typed artifact, and is prevented from becoming the sole authority over the data.
+
+### 1.4 Repository Structure, Technology Stack, and Usage
+
+The **repository** is organized to satisfy both **illustrative purposes** and the **engineering needs** of the system. It contains both **implementation code** and **explanatory material**, but the project should **not** be read as a notebook-only prototype. The main **explanatory notebook** is `main.ipynb`, which is intended to **explain the logic of the pipeline**, show **intermediate artifacts**, and provide a **narrative account of the workflow**.
+
+The **same underlying pipeline** is exposed through **three execution surfaces**. The notebook is the didactic surface, the **command-line entrypoints** in `src/entrypoints/` allow the **stages to be executed individually or end to end** for operational use, and the **Streamlit application** in `app.py` exposes those stages through an **interactive interface**. The point is that the workflow can be studied, scripted, or used interactively without changing its internal logic.
+
+The **main codebase** is under `src/`, and that is where the **real system logic** lives. It is organized into `core/` for shared logic and models, `tools/` for rule-based data processing, `validation/` for the inspection stages, `cleaning/` for planning fixes, generating code, applying changes, checking results, and reporting.
+
+The **technological stack** combines `pandas` and `numpy` for dataframe manipulation and local measurement, [`pydantic`](https://docs.pydantic.dev/latest/) and [`pydantic-ai`](https://ai.pydantic.dev/) for typed agent handoffs, `openai` for the model interface, `python-dateutil` and `dateparser` for date normalization support, `streamlit` for the interactive application, and `logfire` for observability. In practical terms, this means that the project is not built around a notebook alone, but around a small engineered runtime in which deterministic Python code, typed contracts, LLM calls, and tracing infrastructure are combined inside one workflow.
+
+```text
+AgentsAI/
+|-- src/
+|   |-- core/
+|   |   |-- agents.py              # Agent definitions, shared model setup, Logfire bootstrap
+|   |   |-- cache.py               # Cache helpers for intermediate artifacts
+|   |   `-- models.py              # Data models for typed stage handoffs
+|   |-- tools/
+|   |   |-- common_tools.py        # Shared utility helpers
+|   |   |-- schema_tools.py        # Deterministic dtype profiling and naming checks
+|   |   |-- completeness_tools.py  # Placeholder detection and completeness profiling
+|   |   |-- format_tools.py        # Shape-based structural profiling
+|   |   `-- quality_tools.py       # Anomaly, cross-column, and duplicate detection
+|   |-- validation/
+|   |   |-- schema.py              # Schema validation stage
+|   |   |-- completeness.py        # Completeness analysis stage
+|   |   |-- consistency.py         # Format consistency validation stage
+|   |   |-- anomaly.py             # Anomaly detection stage
+|   |   |-- cross_column.py        # Cross-column validation stage
+|   |   |-- duplicates.py          # Duplicate-row detection stage
+|   |   `-- bundle.py              # Validation bundle assembly
+|   |-- cleaning/
+|   |   |-- remediation.py         # Remediation planning stage
+|   |   |-- request.py             # ColumnCleaningRequest construction
+|   |   |-- generation.py          # Cleaner generation and critic-repair loop
+|   |   |-- validation.py          # Host-side cleaner validator
+|   |   |-- application.py         # Apply cleaners and structural actions
+|   |   |-- verification.py        # Post-cleaning verification against original findings
+|   |   |-- reporting.py           # FinalPipelineReport assembly
+|   |   `-- orchestrator.py        # End-to-end cleaning orchestration
+|   `-- entrypoints/
+|       |-- cli.py                 # Argument parsing
+|       `-- main.py                # Stage-level orchestration entry point
+|-- Data/
+|   
+|-- images/
+|-- app.py                         # Streamlit interactive interface
+|-- main.ipynb                     # Explanatory notebook
+|-- requirements.txt
+`-- .env                           # OpenAI API key and optional Logfire token (local only)
+```
+
+
+### 1.5 Reproducibility and Environment
+
+The repository includes a `requirements.txt` file and can be reproduced with a standard virtual environment. A minimal local setup is:
+
+```powershell
+python -m venv .venv
+.venv\Scripts\activate
+pip install -r requirements.txt
+```
+
+On **macOS** (and more generally Unix-like shells), the equivalent setup is:
 
 ```bash
-# 1. Install dependencies
+python3 -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
-
-# 2. Set your Google API key
-export GOOGLE_API_KEY="your_key_here"
-# — or — add it to a .env file in the project root:
-# GOOGLE_API_KEY=your_key_here
-
-# 3. Run the pipeline
-python main.py                                  # uses data/spesa.csv by default
-python main.py data/attivazioniCessazioni.csv   # any other CSV
-python main.py /absolute/path/to/any.csv        # absolute path
 ```
 
----
+Once the environment is activated, the Streamlit and CLI commands shown below are the same on Windows and macOS.
 
-## What the System Does
+Agent-backed stages require an `OPENAI_API_KEY`. The project loads environment variables from `.env` through `python-dotenv`, so the intended setup is to create a `.env` file in the repository root with:
 
-Given any CSV file, the system:
-
-1. Routes through **5 specialist teams** in fixed sequence
-2. Each team **inspects** the current working CSV using LLM-powered ReAct agents
-3. After each team's inspection, a deterministic **fix function** applies corrections and writes a new versioned CSV
-4. A final **reliability score** (0–100, graded A–F) is computed from all findings
-5. Two output reports are saved: a machine-readable JSON and a human-readable Markdown file
-
-The pipeline is **dataset-agnostic** — it uses pandas heuristics to auto-detect column types, date formats, key columns, numeric outliers, and categorical anomalies without any hardcoded column names.
-
----
-
-## High-Level Architecture
-
-```
-main.py
-  └── graph.stream(initial_state)
-        │
-        └── TOP SUPERVISOR (LLM, structured output routing)
-              │
-              ├── [1] schema_team  ──────────────────────────────────────────
-              │         ├── data_type_validator        (ReAct agent)
-              │         └── naming_convention_checker  (ReAct agent)
-              │         → apply_schema_fixes()  → spesa_v1.csv
-              │
-              ├── [2] completeness_team  ────────────────────────────────────
-              │         ├── null_detector               (ReAct agent)
-              │         ├── completeness_rate_calculator(ReAct agent)
-              │         └── sparse_column_detector      (ReAct agent)
-              │         → apply_completeness_fixes()  → spesa_v2.csv
-              │
-              ├── [3] consistency_team  ─────────────────────────────────────
-              │         ├── format_consistency_checker  (ReAct agent)
-              │         ├── cross_column_checker        (ReAct agent)
-              │         └── duplicate_detector          (ReAct agent)
-              │         → apply_consistency_fixes()  → spesa_v3.csv
-              │
-              ├── [4] anomaly_team  ──────────────────────────────────────────
-              │         ├── numerical_outlier_detector  (ReAct agent)
-              │         └── categorical_anomaly_detector(ReAct agent)
-              │         → no CSV change (detection only)
-              │
-              └── [5] remediation_team  ──────────────────────────────────────
-                        ├── correction_suggester         (ReAct agent)
-                        └── reliability_scorer           (ReAct agent)
-                        → spesa_v4.csv (copy of v3) + quality_report.json + quality_report.md
+```dotenv
+OPENAI_API_KEY=your_openai_api_key_here
+LOGFIRE_TOKEN=your_logfire_token_here  # optional
 ```
 
-### Two Supervision Levels
+The `LOGFIRE_TOKEN` is optional and enables the observability tracing described in Section 2.3.
 
-| Level | Role | Mechanism |
-|---|---|---|
-| **Top supervisor** | Routes control between the 5 teams in order 1→2→3→4→5→FINISH | LLM with structured output (`Router` TypedDict) |
-| **Team supervisor** (Consistency & Anomaly) | Routes between workers inside those teams | LLM with structured output |
-| **Fixed edges** (Schema, Completeness, Remediation) | Workers run in deterministic sequence — no LLM supervisor needed | LangGraph `add_edge()` |
+The input dataset must be placed inside the `Data/` folder at the repository root. The default file expected by the pipeline is `Data/spesa.csv`; any other CSV dataset should be placed in the same folder and referenced by name when invoking the CLI, the Streamlit app or in the notebook.
 
----
+After the environment is ready, you can use the notebook, the CLI, or the Streamlit app. The Streamlit application can be launched with:
 
-## Pipeline Execution Flow
-
-```
-START
-  │
-  ▼
-top_supervisor  ──routes──►  schema_team node
-                               │
-                               ├─ invokes schema_graph (subgraph)
-                               │     data_type_validator → naming_convention_checker
-                               │
-                               ├─ reads last AI message (findings summary)
-                               ├─ calls apply_schema_fixes(path, v1_path, profile)
-                               └─ updates working_dataset_path → v1.csv
-                               └─ returns to top_supervisor
-  │
-  ▼
-top_supervisor  ──routes──►  completeness_team node
-                               │  (same pattern: subgraph → fix function → v2.csv)
-  │
-  ▼
-top_supervisor  ──routes──►  consistency_team node
-                               │  (subgraph with internal LLM supervisor → v3.csv)
-  │
-  ▼
-top_supervisor  ──routes──►  anomaly_team node
-                               │  (subgraph → no fix; working_dataset_path unchanged)
-  │
-  ▼
-top_supervisor  ──routes──►  remediation_team node
-                               │  (collects all prior findings from message history)
-                               │  (subgraph → suggestions + score)
-                               │  (saves v4.csv, .json, .md)
-  │
-  ▼
-top_supervisor  ──routes──►  FINISH → END
+```powershell
+streamlit run app.py
 ```
 
-Each team node follows the same 4-step pattern:
-1. **Invoke** the compiled team subgraph with the current `working_dataset_path`
-2. **Extract** the last AI message (the team's natural-language findings)
-3. **Call** the fix function (deterministic Python, no LLM) to produce the next versioned CSV
-4. **Update** `working_dataset_path` in the top-level state and return to the supervisor
+The command-line pipeline can be run through the packaged entrypoint. For example, the validation bundle can be built with:
 
----
-
-## State Management
-
-### `DataQualityState` (top-level, `data_quality/state.py`)
-
-Extends LangGraph's `MessagesState` (which holds a list of `BaseMessage` objects):
-
-| Field | Type | Purpose |
-|---|---|---|
-| `messages` | `list[BaseMessage]` | Accumulated conversation: every team's findings summary as a `HumanMessage` |
-| `original_dataset_path` | `str` | Path to the input CSV — never changes after initialization |
-| `working_dataset_path` | `str` | Path to the current cleaned CSV — updated after each team applies fixes |
-| `dataset_profile` | `dict` | Column-level semantic profile (populated before pipeline start; read-only after) |
-| `next` | `str` | Routing target set by the top supervisor |
-
-### `TeamState` (per-team subgraph, each `teams/*.py`)
-
-Also extends `MessagesState`:
-
-| Field | Type | Purpose |
-|---|---|---|
-| `messages` | `list[BaseMessage]` | The initial task message + each worker's output |
-| `next` | `str` | Routing target set by the team supervisor (used in consistency/anomaly teams only) |
-
-### Message flow between teams
-
-When the top-level graph passes work to a team, it sends a `HumanMessage` like:
-```
-Perform schema validation: check data types and naming conventions.
-
-Dataset path: /path/to/spesa.csv
-```
-When the team finishes, the top-level node wraps the team's last message into a new `HumanMessage` tagged with `name="schema_team"` and appends it to the top-level `messages` list. This means the top supervisor sees a growing history of all prior teams' outputs.
-
-### `_task_only` pattern
-
-Schema, completeness, and remediation teams use a `_task_only` helper that passes **only the first message** (the task + path) to each worker agent. This prevents workers from being confused by prior workers' outputs — each agent sees only the dataset path it needs.
-
----
-
-## Team-by-Team Breakdown
-
----
-
-### Team 1 — Schema Validation
-
-**File:** `data_quality/teams/schema_team.py`
-**Subgraph routing:** Fixed edges (no LLM supervisor)
-**Produces:** `spesa_v1.csv`
-
-```
-START → data_type_validator → naming_convention_checker → END
+```powershell
+python -m src.entrypoints.main Data/spesa.csv --stage validate
 ```
 
-#### Agent 1: `data_type_validator`
-**Tool used:** `validate_data_types`
+The same CLI interface also exposes `dtype`, `schema`, `completeness`, `consistency`, `remediate`, `generate`, `apply`, `verify`, `clean`, and `report`.
 
-Scans every column for type contamination. Two checks are performed:
-- **Numeric contamination**: if ≥90% of values parse as float but there are leftover non-numeric strings → flags them (common causes: `€` symbols, unit suffixes, placeholder strings like `N.D.`)
-- **Date contamination**: if ≥70% of values parse as dates but there are unparseable strings → flags them (common causes: mixed separators, Italian month abbreviations mixed with ISO dates)
 
-Reports findings grouped by severity: CRITICAL (>10% contaminated), MODERATE (1–10%), MINOR (<1%).
+## 2. Methods
 
-#### Agent 2: `naming_convention_checker`
-**Tool used:** `check_naming_conventions`
+### 2.1 General System Architecture and Conceptual Design
 
-Two checks:
-1. **Naming violations**: checks each column name for uppercase letters, spaces, digit-first starts, special characters (`%@!#`), and hyphens. Suggests a corrected `snake_case` name for each.
-2. **Duplicate columns**: uses a two-step detection — normalized-name substring matching + Jaccard value overlap > 80%. Flags columns that are likely redundant copies (e.g., `"SPESA TOTALE"` vs `"spesa"` if they share >80% of unique values).
+The **overall architecture** is based on a **strict separation** between inspection, diagnosis, remediation planning, transformation, and verification. This choice reflects the view that heterogeneous data-quality problems are handled more safely when the workflow is decomposed into narrower stages with explicit responsibilities.
 
-#### Fix function: `apply_schema_fixes(input_path, output_path, profile)`
+![High-level pipeline overview](images/flow_diagrams/01_pipeline_overview.gv.png)
 
-Deterministic corrections (no LLM):
-1. **Exact-name dedup**: drops columns where the normalized form (all lowercase, non-alphanumeric removed) is identical to a prior column
-2. **Substring-name + value-overlap dedup**: for column pairs where one normalized name contains the other, confirms duplication via Pearson correlation (numeric) or Jaccard (categorical) > 0.85/0.80
-3. **Currency stripping**: strips `€`, `$`, `£`, `%`, `EUR` from numeric columns and coerces to float
-4. **Placeholder → NaN**: replaces strings like `"N/A"`, `"-"`, `"??"`, `"null"` with NaN in numeric/identifier columns
-5. **Year shorthand expansion**: if the profile flags a column with 2-digit years (e.g., `24` → `2024`)
-6. **Hyphen → underscore renaming**: renames all `col-name` style columns to `col_name`
-7. **Integer preservation**: coerces whole-number float columns to `Int64` to avoid `.0` suffixes in CSV output
+A **broad architectural overview** of the system is useful because it makes visible the **main split between the validation half and the cleaning half**, while still preserving the end-to-end flow from raw CSV input to cleaned dataset and narrative report.
 
----
+The workflow begins by **loading a dataset** and **building deterministic evidence** about it, then **translating those observations** into **structured findings**. Only after those have been formalized does the system decide whether a **corrective action** is **justified**. When executable **cleaning logic** is needed, the latter is **generated** under a **narrow contract** and is **validated** by the host system before being trusted. After application, the dataset is checked again to confirm that the **targeted issue** was actually reduced.
 
-### Team 2 — Completeness Analysis
+This architecture serves **two purposes**. The first is **technical safety**. If one stage fails, the failure can be localized instead of contaminating the rest of the workflow invisibly. The second is **interpretability**. Because every stage emits a specific typed artifact, the intermediate state of the system can be inspected, cached, reloaded, and discussed both in the notebook and in the final report.
 
-**File:** `data_quality/teams/completeness_team.py`
-**Subgraph routing:** Fixed edges (no LLM supervisor)
-**Produces:** `spesa_v2.csv`
+Conceptually, the system can be read as a **four-layer architecture**. The **first layer** is the **contract layer**, in which [Pydantic](https://docs.pydantic.dev/latest/) models define the typed artifacts exchanged across stages. The **second layer** is the **deterministic evidence-building layer**, in which local Python code measures parse rates, shapes, placeholders, duplicates, and anomalies without asking the model to rediscover raw facts. The **third layer** is the **agent layer**, where LLMs are used only for narrow interpretive or generative tasks that benefit from bounded reasoning. The **fourth layer** is the **host-side enforcement layer**, which remains the final authority whenever generated outputs must be validated before acceptance. 
 
+![Four-layer architecture and dataflow](images/flow_diagrams/02_conceptual_architecture.gv.png)
+
+This decomposition is important because it explains why the pipeline remains both flexible and auditable: interpretation is delegated selectively, while structure, evidence, and final acceptance stay under explicit programmatic control.
+
+### 2.2 Contract Layer and Typed Artifacts
+One of the defining engineering choices of the system is the use of **[Pydantic](https://docs.pydantic.dev/latest/) models** as a **contract layer**. The file `src/core/models.py` defines the **structured objects** that move from one stage to another. In this context, a **schema** is an explicit description of what a stage is allowed to produce and what a downstream stage is allowed to expect. This means that the **output** of a stage is not a free-form paragraph that must later be reinterpreted, but a **validated artifact** with an explicit **schema**.
+
+For example, a raw column may arrive in pandas as generic `object` data, while the schema-stage handoff can still declare that the cleaned target should be `datetime64[ns]` with a canonical `ISO 8601 / date-time` pattern. Downstream stages then receive not just "some text about the column," but a structured statement of what that column is supposed to become after cleaning.
+
+This choice is central to the **reliability of the pipeline**. In an **agentic workflow**, one of the main **risks** is not only that a stage may produce an incorrect answer, but that it **may produce an answer with the wrong structure**. A **malformed handoff** can **silently poison every downstream stage**. Typed artifacts reduce this risk and improve traceability. They also make it possible to cache intermediate results, compare runs, and expose internal state clearly in the notebook and in the application.
+
+### 2.3 Agent Runtime, Retries, and Observability
+
+All **agents are defined** centrally in `src/core/agents.py`, and all runtime control is routed through **shared utilities**. This layer exists because **LLM calls** are the **least deterministic** and most failure-prone component of the pipeline. Rate limits, transient connection failures, and inconsistent retry logic would make the system difficult to reason about if every module handled them independently.
+
+The runtime therefore **centralizes model configuration**, tracing, and retry policy. **Logfire** is used for **observability**. The **current configuration** in `src/core/agents.py` sets the shared model to `openai-responses:gpt-5.4-nano`, although the design allows the model choice to be changed in one place rather than scattered across the codebase. This **centralization supports repeatability and debugging**: a failed agent call can be inspected as a single event inside a larger engineered process.
+
+![Logfire trace of staged agent execution](images/logfire/01_logfire_interface.png)
+
+The Logfire trace displays **individual agent runs as separate observable events**, therefore making the **operational structure** of the pipeline visible during execution, rather than only after the final artifacts have been written. This makes it possible to audit exactly what the pipeline did during a run, at what cost, and where failures or retries occurred.
+
+### 2.4 Detailed Pipeline Stages
+
+The following subsections describe the ordered validation, remediation, cleaning, verification, and reporting stages that make up the operational pipeline.
+
+#### 2.4.1 Data Ingestion and Initial Framing
+
+The **dataset** is loaded into a pandas dataframe and becomes the **authoritative input for validation**.
+
+In the **verification stage**, the **cleaned output may be re-read** as **strings** so that **formatting differences** are not hidden by automatic dtype normalization. This detail is important because the **system evaluates** not only semantic compatibility but also whether the cleaned values respect the **intended canonical representation**. In other words, the **system** is **not satisfied** by a **value that merely parses**; it also **cares** whether the **value has been normalized into the correct target form**.
+
+#### 2.4.2 Schema Validation
+After the raw dataframe has been loaded and framed, **schema validation** becomes the **first domain-facing stage**. Its **purpose** is to **establish what each column is supposed** to **represent after cleaning**, rather than merely describing how the raw values happened to be stored. This **distinction is fundamental**. A column may be loaded as strings while still being, in substance, a date field or a numeric field corrupted by a minority of messy values. What the **system tries to understand** is what a **certain column is meant to represent rather than how it happens to be encoded** in the raw data. The **schema handoff makes this visible** in a concrete way.
+
+Each column that passes through the schema stage produces a `SchemaHandoff` entry. The most important fields in that entry are `pandas_dtype`, which is the inferred target dtype after cleaning, and `detected_pattern`, which is the canonical form the cleaned values should follow. Both fields are produced by the `dtype-inference` agent from the bounded column profile.
+
+``` json
+    {
+      "name": "aggregation-time",
+      "pandas_dtype": "datetime64[ns]",
+      "numeric_role": null,
+      "string_role": null,
+      "detected_pattern": "ISO 8601 / date-time",
+      "rationale": "Datetime parse is 99.0% with clear timestamp/date strings (e.g., '2024-03-11T02:01:04.421', '24.10.2024'). Minority non-standard formats are treated as corruption; cleaned dtype is datetime64[ns].",
+      "non_null_rows": 7543,
+      "distinct_non_null_values": 66,
+      "numeric_parse_pct": 0.0,
+      "datetime_parse_pct": 99.03221529895268,
+      "empty_like_pct": 0.0,
+      "sample_values": [
+        "2024-03-11T02:01:04.421",
+        "2024-07-11T03:01:16.866",
+        "2024-09-11T03:01:11.704",
+        "2024-05-11T03:01:07.269",
+        "2024-11-11T02:00:28.485"
+      ],
+      "naming_valid": false,
+      "rename_suggestion": "aggregation_time",
+      "naming_reason": "Column name contains a hyphen, which violates the lowercase snake_case naming rule."
+    }
 ```
-START → null_detector → completeness_rate_calculator → sparse_column_detector → END
-```
+The `detected_pattern` field is the value that the consistency stage (Section 2.4.4) will later use as a semantic contract when deciding whether observed value shapes count as inconsistent.
 
-#### Agent 1: `null_detector`
-**Tool used:** `detect_missing_values`
+The stage begins with **deterministic profiling** in `src/tools/schema_tools.py`. It computes non-null counts, distinct counts, numeric parse percentages, datetime parse percentages, and representative value samples. 
 
-Counts true NaN/null values AND placeholder strings that masquerade as real data (the `PLACEHOLDER_VALUES` set from `config.py`: `"n.d."`, `"NULL"`, `"unknown"`, `"?"`, `"//"`, `"-"`, `"null"`, `"N/A"`, `"undefined"`, `"ND"`, `""`, `" "`, `"nan"`).
+One particularly important **design choice** is that the `dtype-inference` prompt does **not receive the whole column**. It receives a **bounded instance of the column** built from a random sample of up to **5% of dataset rows**, capped at **500 unique non-null values per column**, together with the column name and whole-column parse statistics. 
 
-Reports: null count, null%, effective missing%, and severity rating per column. Also counts how many rows have at least one missing value anywhere.
+This is a deliberate **compromise between interpretability and cost efficiency**. The system does not rquire to spend **tokens** on entire columns when the purpose of the stage is conceptual inference rather than exhaustive memorization, so it gives the LLM a **bounded local view** through the sample and a **global statistical view** through whole-column parse percentages. The sample is not enough to reproduce the full empirical distribution of a large column, but it is often enough to show what the column is trying to represent. If, for example, the raw pandas dtype is `object` but the sampled values are all strings corresponding to numbers between `1` and `12`, the agent can reasonably infer that the true cleaned dtype should be `Int64` rather than free text. In the same way, a column whose raw values are strings may still clearly reveal itself as a date field, a code, or a decimal measure once the sampled values are read together with the column name. This is what allows the system to remain relatively economical while **still making a semantically informed dtype decision**.
 
-#### Agent 2: `completeness_rate_calculator`
-**Tool used:** `calculate_completeness_rate`
+The same `dtype-inference` call **returns** not only the **target cleaned pandas dtype**, but also the **semantic role of the column and a dominant canonical pattern** when that pattern is clear enough. In other words, the dominant pattern is not deferred to a second dtype-inference call. It is **already part of the schema-stage inference**. In parallel, **deterministic naming checks identify unsafe column names** and **duplicate-semantic groups**. The **result** is merged into a structured `SchemaHandoff`.
 
-Computes the completeness percentage (= 100% − missing%) for every column and an overall dataset figure. Reports columns sorted worst-first, with analysis implications for columns below 80% complete.
+![Schema stage internals: profiling, dtype-inference agent, naming checks, and merge](images/flow_diagrams/03_schema_stage_internals.gv.png)
 
-#### Agent 3: `sparse_column_detector`
-**Tool used:** `detect_sparse_columns`
+This **hybrid design is deliberate**. **Parse rates and naming rules** are **straightforward deterministic checks**. Interpreting a messy profile as a cleaned target dtype benefits from semantic reasoning, but only when that reasoning is grounded in bounded evidence rather than raw unrestricted data.
 
-Identifies columns above a 50% missing threshold. Classifies them into:
-- **Removal candidates** (>95% missing): recommend immediate drop
-- **High-sparsity columns** (50–95% missing): recommend drop vs. impute vs. add a binary indicator column
+#### 2.4.3 Completeness Analysis
 
-#### Fix function: `apply_completeness_fixes(input_path, output_path, profile)`
+Completeness analysis exists because missingness in real datasets is often **disguised**, so a naive null count is usually insufficient. The system therefore defines a **list of potential placeholder tokens** such as `N/A`, `-`, `unknown`, and empty strings, normalizes raw cell values against that list, and treats matches as **missing-like** rather than genuine content. This matters because many administrative datasets contain cells that are technically non-null but still informationally empty.
 
-1. **Placeholder → NaN**: all `PLACEHOLDER_VALUES` strings replaced with `pd.NA`
-2. **Drop ultra-sparse columns**: drops any column >95% empty
-3. **Numeric median fill**: fills NaN in columns profiled as `semantic_type: numeric` with the column median
-4. **Categorical 'Unknown' fill**: fills remaining NaN in string columns with `"Unknown"`
-5. **Integer preservation**: coerces whole-number float columns to `Int64`
+Starting from this placeholder list, `src/tools/completeness_tools.py` **builds a deterministic completeness profile**. It computes completeness percentages, detects missing-like tokens, records representative placeholder examples, and marks sparse columns. More specifically, the completeness logic constructs a **missing-like mask** that merges true nulls, empty strings, and configured placeholder values into one unified notion of absence. 
 
----
+![Completeness detection: how true nulls, empty strings, and placeholder tokens are merged into the missing-like mask](images/flow_diagrams/04_completeness_detection_flow.gv.png)
 
-### Team 3 — Consistency Validation
+This profile is then **interpreted** by the `completeness-analysis` agent, which **returns** a **structured report with per-column recommendations**.
 
-**File:** `data_quality/teams/consistency_team.py`
-**Subgraph routing:** LLM supervisor (`consistency_supervisor_node`)
-**Produces:** `spesa_v3.csv`
-
-```
-START → consistency_supervisor
-              │
-              ├──► format_consistency_checker → consistency_supervisor
-              ├──► cross_column_checker       → consistency_supervisor
-              └──► duplicate_detector         → consistency_supervisor → END
-```
-
-This is one of two teams with an LLM mid-level supervisor. After each worker reports, the supervisor decides the next worker to call. It enforces a fixed order (format → cross → duplicates) and only responds `FINISH` once all three have completed.
-
-#### Agent 1: `format_consistency_checker`
-**Tool used:** `check_format_consistency`
-
-Auto-detects three column categories using pandas heuristics, then checks each:
-- **Period columns** (YYYYMM): >80% of values match a 6-digit numeric where `month ∈ 1–12` and `year ∈ 1900–2099`. Flags any value not in pure YYYYMM format.
-- **Date columns**: >60% of values match any of 8 date regex patterns. Flags mixed formats within a column (e.g., some rows `DD/MM/YYYY`, others `YYYY-MM-DD`).
-- **Text columns**: flags mixed casing (e.g., some values all-caps, others title case) if no single case style covers >70% of the column.
-
-#### Agent 2: `cross_column_checker`
-**Tool used:** `check_cross_column_logic`
-
-Two checks:
-1. **Code-label consistency**: for any column named `cod_X`, looks for a matching label column (`X`, `tipo_X`, `desc_X`). If the same code maps to multiple different labels across rows, flags it as inconsistent.
-2. **Unexpected negatives**: for every numeric column with ≥10 non-null values, flags if any negative values are present (typically a sign violation for spending amounts, counts, etc.).
-
-#### Agent 3: `duplicate_detector`
-**Tool used:** `detect_duplicates`
-
-1. **Exact duplicates**: counts rows where all column values are identical.
-2. **Near-duplicates on key columns**: auto-detects key columns by name pattern (`id`, `cod`, `code`, `key`, `codice`). If none found, falls back to columns where >50% of values are unique. Finds rows that share all key-column values but differ elsewhere.
-
-#### Fix function: `apply_consistency_fixes(input_path, output_path)`
-
-1. **Normalise period columns** to YYYYMM: handles `YYYY-MM`, `MM/YYYY`, `MON-YYYY` formats
-2. **Normalise date columns** to `YYYY-MM-DD`: handles `DD/MM/YYYY`, `YYYY/MM/DD`, `DD.MM.YYYY`, `DD-MM-YYYY`, `DD-MM-YY`, ISO-8601 datetimes, and Italian/English month abbreviations
-3. **Drop exact duplicate rows**
-
----
-
-### Team 4 — Anomaly Detection
-
-**File:** `data_quality/teams/anomaly_team.py`
-**Subgraph routing:** LLM supervisor (`anomaly_supervisor_node`)
-**Produces:** No CSV change (detection only — `working_dataset_path` is not updated)
-
-```
-START → anomaly_supervisor
-              │
-              ├──► numerical_outlier_detector   → anomaly_supervisor
-              └──► categorical_anomaly_detector → anomaly_supervisor → END
+``` json
+    {
+      "column_name": "ente",
+      "completeness_pct": 96.26143444252949,
+      "missing_like_count": 282,
+      "missing_like_examples": [
+        "unknown",
+        "",
+        "//",
+        "?",
+        "n.d.",
+        "-"
+      ],
+      "sparse_candidate": false,
+      "recommended_action": "Targeted review of missing/placeholder-like values in this column; standardize placeholder tokens (e.g., unknown, //, n.d., -) and empty strings upstream."
+    }
 ```
 
-#### Agent 1: `numerical_outlier_detector`
-**Tool used:** `detect_numerical_outliers`
+The **role of the agent** at this stage is not to discover missingness independently, but to transform **measured evidence** into a downstream-readable handoff. The **practical benefit** is that later stages do not need to repeat the same reasoning. They receive an **explicit statement** of which columns contain hidden missingness, which placeholder families are present, and whether some columns should be reviewed because they contain almost no meaningful information.
 
-Auto-detects every numeric column (either already numeric dtype, or ≥80% of non-null values parse as float). For each column with ≥10 values, runs two methods:
+#### 2.4.4 Format Consistency Validation
 
-- **IQR method**: fences at Q1 − 1.5×IQR and Q3 + 1.5×IQR. Any value outside is flagged.
-- **Z-score method**: flags values with `|z| > 3` (i.e., more than 3 standard deviations from the mean).
+**Format consistency validation** connects diagnosis to executable cleaning. Its purpose is to **identify columns whose values are semantically similar but structurally inconsistent** in ways that justify normalization. Typical examples include mixed date layouts, mixed encodings for period identifiers, or numeric fields that include punctuation or textual noise.
 
-Reports per column: descriptive stats (min/max/mean/std), outlier counts, example outlier values, and a qualitative verdict.
+##### Inputs from the Schema Handoff
 
-#### Agent 2: `categorical_anomaly_detector`
-**Tool used:** `detect_categorical_anomalies`
+The consistency stage does not start from scratch. It receives the **schema handoff** described in Section 2.4.2, which already carries the **target cleaned dtype** and, when available, the **`detected_pattern`** inferred during schema inference. That pattern is semantic and canonical: it expresses what the column should mean and what form its values should take after normalization — for example `YYYYMM period key`, `4-digit year`, or `month number (1-12)`. The consistency stage then **complements that semantic contract with a raw structural profile** computed directly from the observed values in `src/tools/format_tools.py`.
 
-Auto-detects categorical columns: string columns with <50 unique values OR unique/total ratio < 5%. For each:
-- **Rare values**: flags any category appearing in <0.5% of rows
-- **Invalid markers**: checks for remaining placeholder strings (`"Unknown"`, `"N/A"`, `"?"`, `"ND"`, etc.) that may have survived earlier fixes
+##### Shape Profiling
 
-Reports per column: top-5 most frequent values, rare values with counts, and a verdict.
+The structural profile is built by **rendering non-null, non-empty values as strings** and **abstracting them through a shape function**. The shape function replaces every digit with a representative digit placeholder and every letter with a letter placeholder, collapsing consecutive identical placeholders, so that surface structure is captured without retaining actual content. For example, `202402` becomes `999999`, `04/2024` becomes `99/9999`, and `2025-06-18T16:15:20.148346` becomes a timestamp shape. The profiler counts how often each shape appears, ranks them by frequency, and defines the **`dominant_shape`** as the most frequent one among the filtered values. Its relative prevalence is stored as **`dominant_shape_pct`**. Both fields appear in the `ColumnFormatFacts` object passed to the agent on the slow path.
 
----
+The **relationship between `detected_pattern` and `dominant_shape`** operates at different levels of abstraction and the two fields answer different questions:
 
-### Team 5 — Remediation & Reliability
+- **`detected_pattern`** answers *"what should this column look like?"* — produced by the LLM from a bounded profile and a column name, it is the normalization target.
+- **`dominant_shape`** answers *"what does this column look like right now, in the majority of rows?"* — produced deterministically from the raw values as they actually appear.
 
-**File:** `data_quality/teams/remediation_team.py`
-**Subgraph routing:** Fixed edges (no LLM supervisor)
-**Produces:** `spesa_v4.csv` (copy of v3) + `quality_report.json` + `quality_report.md`
+In practice, the two can align closely or diverge significantly. For `rata` in `spesa.csv`, the `detected_pattern` is `YYYYMM period key` and the `dominant_shape` is `999999`: a direct match. For `mese` in `attivazioniCessazioni.csv`, the `detected_pattern` is `month number (1-12)`, but the raw shapes split between `9` for single-digit months such as `7` and `99` for two-digit months such as `11`, with additional textual shapes for forms like `NOV` or `Novembre`. There the `detected_pattern` declares the target, while the `dominant_shape` distribution reveals the extent of drift and which shape families should be treated as already valid versus inconsistent.
+
+##### Entry Gate Conditions
+
+Before either execution path is taken, two gate conditions extend coverage beyond the shape-based heuristic alone.
+
+1. **Schema-driven bypass for numeric columns.** When an `Int64` or `Float64` column already has a concrete `detected_pattern`, the stage skips the name-based `machine_format_candidate` heuristic and proceeds directly to schema-guided validation, even for columns whose names fall outside the recognized keyword vocabulary.
+2. **`numeric_parse_pct` fallback threshold.** A column such as `month`, whose valid values split across shapes like `9` and `99`, may fail the dominant-shape threshold despite being clearly machine-readable. Adding `numeric_parse_pct >= 85` as a secondary gate lets such columns enter validation without changing the normalization target, so zero-padded values such as `03` can still be treated as inconsistent against a dominant `9`.
+
+##### Fast Path and Slow Path
+
+The two gate conditions feed into two execution paths defined in `src/validation/consistency.py`. When the schema handoff already provides an **unambiguous `detected_pattern`**, the stage takes a **deterministic fast path** and uses that pattern directly as its validation contract, especially for numeric and code-like columns.
+
+![Format consistency validation: entry gate, schema-guided fast path, and agent-backed slow path](images/flow_diagrams/05_format_consistency_paths.gv.png)
+
+The `dominant_shape` confirms what the majority of rows already look like and which examples must be preserved rather than transformed. If **no stable schema pattern exists**, or if the pattern is too ambiguous to serve as a direct contract, the stage **falls back to the agent-backed slow path**.
+
+##### Agent Evidence Bundle (Slow Path)
+
+On the slow path, the format-consistency agent does not receive the whole raw column. Instead it receives a **compact `ColumnFormatFacts` object** serialized as a plain-text JSON attachment, containing:
+
+- target dtype hint, parse percentages, and empty-like percentage
+- semantic hint (`detected_pattern`), dominant shape, and dominant-shape percentage
+- representative dominant values and grouped inconsistent examples
+- a compact summary of the most frequent raw value shapes
+
+The **prompt** is equally explicit: it states the dataset name, column name, total row count, dominant shape, percentage of rows matching that shape, number of inconsistent rows, and, when available, the schema-stage target dtype and semantic role.
+
+The following artifact illustrates this evidence bundle for the `RATA` column in `spesa.csv`, showing the exact balance the slow path relies on: **global column signals** such as parse rates and dominant-shape prevalence, together with **grouped concrete outliers** that reveal the main inconsistency families.
+
+```json
+{
+  "column_name": "RATA",
+  "pandas_dtype": "object",
+  "total_rows": 7543,
+  "non_null_rows": 7543,
+  "distinct_non_null_values": 66,
+  "numeric_parse_pct": 100.0,
+  "datetime_parse_pct": 0.0,
+  "empty_like_pct": 0.0,
+  "semantic_hint": "temporal_period",
+  "machine_format_candidate": true,
+  "dominant_shape": "999999",
+  "dominant_shape_pct": 89.4,
+  "dominant_example_values": [
+    "202311",
+    "202307",
+    "202308"
+  ],
+  "inconsistent_rows": 802,
+  "inconsistent_examples": [
+    { "value": "2023-09", "shape": "9999-99", "count": 143 },
+    { "value": "DIC-2023", "shape": "AAA-9999", "count": 88 },
+    { "value": "09/2024", "shape": "99/9999", "count": 67 }
+  ],
+  "top_value_shapes": [
+    { "shape": "999999", "count": 224, "pct": 89.6, "sample_values": ["202311", "202307", "202308"] },
+    { "shape": "9999-99", "count": 11, "pct": 4.4, "sample_values": ["2023-09", "2024-04"] },
+    { "shape": "99/9999", "count": 8, "pct": 3.2, "sample_values": ["09/2024", "12/2023"] }
+  ]
+}
+```
+
+The amount of evidence is deliberately bounded. Dominant examples are capped at five values, outlier families are grouped and trimmed through `select_outlier_examples(...)`, and the top-shape profile is summarized from a bounded sample rather than the full rendered column. The slow path is therefore **not an unconstrained semantic guess**, but a bounded decision over a pre-structured evidence bundle.
+
+##### Selectivity and the Trigger Condition
+
+Not every variation should trigger cleaning. Free-text fields, notes, names, or descriptive categorical columns may contain diverse content without containing any format error. The stage therefore emits a `FormatConsistencyFinding` only when a **clear canonical representation exists** and a **measurable inconsistent minority can reasonably be normalized toward it**. This is the core trigger for later cleaner generation.
+
+#### 2.4.5 Anomaly Detection
+
+**Anomaly detection** is separated from format normalization because **suspicious values are not automatically incorrect values**. A large outlier, a rare category, or an unusual code may indicate corruption, but it may also represent a **valid edge case**. **Automatic rewriting** in such cases would be **risky**.
+
+``` json
+    {
+      "column_name": "spesa",
+      "anomaly_type": "numeric_outlier",
+      "severity": "high",
+      "affected_rows": 1101,
+      "example_values": [
+        "43365008.73",
+        "7639226.66",
+        "3887279.49",
+        "9518447.34",
+        "10455819.51",
+        "87912478.86",
+        "6543617.570000316",
+        "6807615.07"
+      ],
+      "evidence": "1101 rows fall outside the robust IQR band [-1879828.180, 2512978.350] computed from Q1=2803.190, Q3=630346.980.",
+      "suggested_action": "Review whether these values are genuine extreme cases or unit/format errors before imputation or removal."
+    }
+```
+
+The system **detects anomaly candidates deterministically** in `src/tools/quality_tools.py`. **Numeric outliers, suspicious negative values in mostly non-negative measures, and rare categorical values are not found by prompting an LLM**, but by **running explicit local rules** over the schema-aware dataset representation. The `anomaly-summary` agent is used only afterward to **write a concise structured summary of findings that have already been computed**.
+
+The **numeric detector** applies only to columns that the **schema stage has already classified as numeric measures**. This means that **numeric codes and indicators are excluded deliberately**, because they may be numeric without behaving like continuous quantities. The detector also **requires a minimum amount of evidence before it runs**: at least 20 parseable numeric values and at least 10 distinct numeric values. Once those conditions are satisfied, the implementation computes the first quartile `Q1`, the third quartile `Q3`, and the interquartile range
+
+$$ IQR = Q3 - Q1 $$
+
+Then it defines a conservative outlier band
+
+$$ \text{lower} = Q1 - 3 \times IQR \quad;\quad \text{upper} = Q3 + 3 \times IQR$$
+
+Any value outside that interval is **marked as an outlier candidate**. The use of $3 \times IQR$ rather than the more aggressive $1.5 \times IQR$ is **intentional**: the project **prefers to reduce false positives** on naturally skewed public-administration measures. In other words, the detector is **calibrated to surface suspicious extremes**, not to flag every moderately unusual value. The **severity** is then set to `high` when the outlier rows are at least 2 percent of the dataset and `medium` otherwise.
+
+The **negative-value detector** complements this statistical rule with a **domain-shaped heuristic**. It looks only at columns whose **schema role is `measure`**, converts them to numeric values, and checks whether the column is **overwhelmingly non-negative overall**. When at least **95 percent** of parsed values are non-negative, any remaining **negative values are surfaced as anomaly candidates** rather than being ignored simply because they do not cross the IQR fence. This rule is still conservative: it does **not** assume that every negative value is wrong, but it does force explicit review when a mostly non-negative measure column contains a small pocket of negatives that may reflect sign errors, refunds, or adjustments. The **severity** is set to `high` when the column is at least **99 percent non-negative** and `medium` otherwise.
+
+The **rare-category detector** follows a **different logic** because it is designed for **low- to moderate-cardinality textual columns** rather than for numeric distributions. It applies only to columns whose **dtype family is textual** and whose **schema role is not** `free_text`, `name`, or `identifier`. **Placeholder tokens are removed first** so that missing-like noise does not become an apparent category. The detector then checks that the column is **suitable for this heuristic at all**. It is **skipped** if the number of distinct labels is below 5, above 50, or so diverse that the distinct-value ratio exceeds 20 percent of the non-null rows. It is also skipped if the most common category occupies less than 20 percent of the column, because in that case the column has **no stable baseline from which "rare" can be defined meaningfully**.
+
+If the column passes those eligibility checks, the **threshold for rarity** is computed as
+
+$$ \text{rarethreshold} = \max(1, \lfloor 0.005 \times n \rfloor) $$
+
+where `n` is the number of non-null, non-placeholder rendered values in the column. **Every category whose frequency is less than or equal** to that threshold is **treated as a rare-category candidate**. The total **number of rows covered by those rare labels** becomes the **affected-row count**. The **severity** is set to `medium` when at most 5 rows are affected and `low` otherwise, because rare labels are treated as **weak anomaly signals rather than as strong evidence of error**.
+
+One additional implementation detail matters here. Before the final anomaly report is assembled, `src/validation/anomaly.py` **suppresses duplicate-semantic aliases** that were already identified in the schema handoff. This **prevents the same anomaly from being reported twice** merely because the dataset contains two columns that normalize to the same meaning. The output of the stage is therefore interpretive rather than generative. It **highlights potential risk signals that deserve attention**, but it does **not convert those signals directly into cleaning code**.
+
+#### 2.4.6 Cross-Column Validation and Duplicate Detection
+
+A dataset may contain columns that look reasonable in **isolation** and still contradict one another when compared. Similarly, **row-level redundancy** introduces a different class of quality issue from format inconsistency.
+For this reason, the system includes **deterministic cross-column checks and duplicate detection** in `src/tools/quality_tools.py`. No LLM performs these checks. The corresponding agents, `cross-column-summary` and `duplicate-summary`, are used only afterward to summarize findings that have already been computed by Python.
+
+The **cross-column stage** therefore applies **explicit programmatic rules**. **Exact and near-duplicate columns** are detected by first restricting the comparison to **eligible pairs**, meaning columns that belong to the same broad dtype family and are not obviously incomparable, such as free-text columns or a numeric measure compared against a numeric code. Values are **normalized for case and whitespace**, and the comparison is performed only on rows where **both columns contain** a **real non-placeholder value**. At least 20 comparable rows must exist, and the overlap between the two columns must cover at least 80 percent of the smaller present-value set. If the **two normalized columns agree on every comparable row**, they are **flagged as exact duplicate columns**. If they do not agree perfectly but **still agree on at least 95 percent of comparable rows**, and the number of mismatches stays below `max(10, ceil(0.05 * comparable_rows))`, they are flagged as **near-duplicate columns**.
+
+``` json
+    {
+      "columns": [
+        "provincia_sede",
+        "Provincia Sede"
+      ],
+      "check_type": "duplicate_semantic_conflict",
+      "severity": "high",
+      "affected_rows": 105,
+      "example_row_indices": [
+        110,
+        349,
+        500,
+        531,
+        547,
+        954,
+        1437,
+        1608
+      ],
+      "similarity_pct": 99.44,
+      "evidence": "Columns 'provincia_sede' and 'Provincia Sede' normalize to the same schema name but disagree on 105 of 18842 rows where both values are present (99.44% similarity).",
+      "suggested_action": "Review whether one column should override the other, whether they need reconciliation rules, or whether both must be preserved separately."
+    }
+```
+
+The **same deterministic approach** is used for the **relational checks**. **Year-month-period mismatches** are detected by rebuilding the expected `YYYYMM` key from the year and month columns and comparing it directly against the stored period key. **Date-order violations** are detected by checking whether a likely start date occurs after a likely end date. These are **straightforward logical comparisons**, so the system **treats them as rule-based checks rather than as interpretive model tasks**.
+
+The **duplicate stage** follows the same philosophy at row level. **Exact duplicate rows** are detected after case and whitespace-normalization of the full row signature. **Near-duplicate rows** are detected differently: the system first infers a small set of likely business-key columns*, preferring identifiers, numeric codes, and temporal keys such as year, month, or `YYYYMM`. Rows that share the same **normalized key values** are **grouped together**, and if those rows differ elsewhere in the record they are **flagged as near-duplicate groups**. This means that near-duplicate rows are not simply "similar-looking" rows. They are rows that appear to refer to the same entity or event under the inferred key columns, while still containing some disagreement in the remaining fields.
+
+#### 2.4.7 Validation Bundling and Remediation Planning
+
+After schema, completeness, consistency, anomaly, cross-column, and duplicate analyses have been completed, the **outputs are bundled into a unified validation artifact**. This bundling is necessary because the cleaning half of the pipeline should consume one coherent view of the dataset rather than several loosely connected reports.
+
+![Ordered validation flow ending in the validation bundle](images/flow_diagrams/06_validation_stage_pipeline.gv.png)
+
+The **remediation planner** in converts the validation bundle into a **structured list of RemediationAction objects**. This is the stage where **diagnostic findings are translated into explicit allowed interventions**. Low-risk and mechanically justified findings, such as safe column renames, dtype casts, placeholder-to-null replacement, exact duplicate-column removal, or exact duplicate-row removal, become auto-applicable actions.
+
+![Remediation policy decision tree: how each finding type maps to an action category](images/flow_diagrams/07_remediation_policy_tree.gv.png)
+
+``` json
+{
+  "dataset_name": "spesa",
+  "actions": [
+    {
+      "action_id": "cast_dtype__aggregation_time__datetime64_ns",
+      "action_type": "cast_dtype",
+      "object_type": "column",
+      "target": {
+        "column_name": "aggregation_time",
+        "target_dtype": "datetime64[ns]"
+      },
+      "source_check": "schema_validation",
+      "confidence": "high",
+      "risk_level": "low",
+      "auto_apply": true,
+      "status": "planned",
+      "reason": "Cast the column to inferred dtype datetime64[ns].",
+      "preview_stats": {
+        "non_null_rows": 7543
+      }
+    },
+    {
+      "action_id": "rename_column__2cod_imposta__cod_imposta_2",
+      "action_type": "rename_column",
+      "object_type": "column",
+      "target": {
+        "column_name": "2cod_imposta",
+        "new_name": "cod_imposta_2"
+      },
+      "source_check": "schema_validation",
+      "confidence": "high",
+      "risk_level": "low",
+      "auto_apply": true,
+      "status": "planned",
+      "reason": "Column name contains a leading digit, which violates the lowercase snake_case naming rule.",
+      "preview_stats": {
+        "non_null_rows": 7543
+      }
+    }
+}
 
 ```
-START → correction_suggester → reliability_scorer → END
+
+**Findings** that are **more ambiguous**, such as anomalies, near-duplicate columns, semantic conflicts, temporal mismatches, date-order violations, or near-duplicate rows, are **converted** into `manual_review` or `report_only` actions instead of being executed automatically. This policy is especially important because the system has no **guaranteed knowledge** of the final analytical **purpose of the dataset**. A suspicious row, an anomaly, a disagreement between semantically similar columns, or a rare category may be simple noise, a dirty entry, a legacy encoding, or genuinely meaningful information that should be preserved because it could be useful or interesting for further analysis. Since that contextual knowledge is not available inside the raw dataset itself, the **pipeline adopts a conservative intervention strategy**: clear and low-risk transformations can be automated, but ambiguous findings are redirected to manual review rather than modified directly.
+
+#### 2.4.8 Cleaning Request Construction
+
+A **format-consistency finding** is not, by itself, a **sufficient contract for code generation**. Before code can be generated safely, the **system must construct a richer object** that states what the correct target looks like, which examples must remain unchanged, which examples must be transformed or nulled, and which output dtype the generated function must respect. This role is performed by the **cleaning request builder** in `src/cleaning/request.py` and related orchestration logic. 
+
+```json
+{
+  "dataset_name": "spesa",
+  "column_name": "aggregation-time",
+  "expected_pattern": "datetime format like '2024-03-11T02:01:04.421'",
+  "semantic_hint": "temporal_period",
+  "target_dtype": "datetime64[ns]",
+  "target_role": null,
+  "dominant_shape": "9999-99-99A99:99:99.999",
+  "dominant_example_values": [
+    "2024-03-11T02:01:04.421",
+    "2024-07-11T03:01:16.866",
+    "2024-09-11T03:01:11.704"
+  ],
+  "example_inconsistent_values": [
+    "11/01/2024",
+    "24/10/2024",
+    "11-11-24",
+    "2024/06/11",
+    "GIU 11 2024"
+  ],
+  "enforce_year_only_yyyymm_january": false,
+  "suggested_strategy": "Datetime output contract:\n- Preserve already-valid dominant timestamps unchanged, for example '2024-03-11T02:01:04.421'.\n- The cleaned output must use that same canonical datetime layout, including the same date order, separator style, time component, and fractional-second precision.\n- For date-only inputs, emit midnight in that same canonical layout.\n- Do not just replace separators blindly. Reorder components explicitly before formatting the final timestamp.\n\nExisting shape notes:\n- '11/01/2024' -> '2024-01-11T00:00:00.000'\n- '24/10/2024' -> '2024-10-24T00:00:00.000'\n- '11-11-24' -> '2024-11-11T00:00:00.000'\n- '2024/06/11' -> '2024-06-11T00:00:00.000'\n- 'GIU 11 2024' -> '2024-06-11T00:00:00.000'"
+}
 ```
 
-This team is special: it does **not** receive a dataset path. Instead, the top-level graph node (`call_remediation_team`) collects all findings from the message history and packages them as a JSON string. Both agents receive this consolidated findings payload.
+The resulting `ColumnCleaningRequest` is the **direct interface between validation and generation**. It is **particularly important for datetime-like columns**, where careless branch logic can easily damage values that were already valid. For example, a naive cleaner that rewrites any date-looking string could take an already valid value such as `2024-03-11T02:01:04.421`, drop the original time component and fractional seconds, or even reorder the date parts incorrectly while trying to normalize outliers such as `11/01/2024` or `11-11-24`. The **request object makes the preservation requirement explicit instead of leaving it implicit**. These bounded examples are later reused by the host-side validator, but they are no longer the only acceptance check: before a cleaner is accepted, the pipeline also performs a **full-column local dry run** on the target column, skipping nulls and placeholder-like tokens that belong to later cleaning stages.
 
-#### How findings are collected
+#### 2.4.9 Cleaner Generation, Critic Loop, and Stagnation Control
 
-```python
-# Inside call_remediation_team (graph.py)
-for m in state["messages"]:
-    if isinstance(m, HumanMessage) and m.name in team_names:
-        findings[m.name] = _extract_text(m.content)
-all_findings_text = "\n\n".join(findings.values())
-findings_payload = json.dumps({"all_findings_text": all_findings_text})
+**Executable cleaning logic** is generated only for columns where the system has already established that a **narrow normalization target** exists. For each `ColumnCleaningRequest`, the `column-cleaner-generator` agent is asked to **produce one self-contained Python function** that receives a scalar value and returns either a cleaned string or `None`. The generator begins from the same **`temperature = 0` baseline** used by the main operational agents, so that runs over the same bounded request remain as reproducible as possible unless the loop later detects stagnation.
+
+This stage is intentionally **constrained**. The **generated code is allowed one grouped self-test** through `CodeExecutionTool`, and that permission is bounded in `src/cleaning/generation.py`. The **purpose of that self-test is limited**: it allows the model to try its function on representative already-valid and inconsistent examples before returning it. The self-test does not certify correctness. **Final acceptance remains with the host-side validator** in `src/cleaning/validation.py`.
+
+![Generation, validation, critic, and stagnation loop](images/flow_diagrams/08_cleaner_generation_loop.gv.png)
+
+If a **generated cleaner fails host-side checks**, the `cleaner-repair-critic` agent receives the **authoritative validation issues** and **writes a diagnosis for the next attempt**. This creates a **repair loop** in which the generator **does not simply retry blindly**, but is **guided by explicit information** about which preservation rule, parsing branch, or structural guard failed.
+
+The implementation also contains a **stagnation mechanism** for the generator loop. Stagnation is detected when a new attempt **repeats the same cleaner code** as the previous attempt or **reproduces the same host-side validation fingerprint**. Once that happens, the next retry enters a **stagnation override** mode: the prompt injects a stricter rewrite brief with a mandatory control-flow skeleton, and the generator temperature is no longer left at the default `0`. Instead, it is bumped to **`0.2` on the first stagnant retry** and then increased gradually by **`0.1` per additional stagnant retry**, capped at **`0.5`**. The goal is not generic randomness, but to force a meaningfully different repair attempt when the loop has started repeating itself.
+
+#### 2.4.10 Cleaner Application and Verification
+
+Once the **remediation plan** and the **accepted cleaners** are available, the **application stage executes the actions in a specific order**. **Generated cleaners are applied first** while the original column identities are still intact. Placeholder-to-null actions, exact duplicate-column drops, renames, and dtype casts follow in sequence. This ordering is important because an **early rename or cast could interfere with later steps** that still rely on the original structural assumptions.
+
+![Cleaning half pipeline: action router, generation path, application ordering, and verification](images/flow_diagrams/09_cleaning_half_pipeline.gv.png)
+
+**Application alone**, however, is not treated as success. After the cleaned CSV is produced, the **verification stage** in `src/cleaning/verification.py` re-runs consistency analysis and compares the new findings against the original ones. The result is a **structured assessment** of whether each targeted issue was resolved, improved, left unchanged, or regressed.
+
+![Post-cleaning verification: re-read, reshape, diff engine, and outcome classification](images/flow_diagrams/10_post_cleaning_verification.gv.png)
+
+**Verification** is one of the **strongest safeguards** in the system because it prevents the system from equating successful code generation with successful data-quality improvement.
+
+#### 2.4.11 Final Reporting
+
+The system **separates factual aggregation** from **narrative explanation**. Once **validation**, **remediation**, **cleaning**, and **verification outputs** exist, the pipeline first builds a `FinalPipelineReport`, which functions as the **canonical factual summary** of the run. Only after this factual object exists does the **narrative layer** generate a human-readable report through the `narrative-frontmatter` and `narrative-section` agents.
+
+This distinction matters because the **factual report is deterministic**, while the **prose layer is only the presentation layer**. The factual stage does **not** ask an agent to decide what happened. It merges the already-produced validation, remediation, cleaning, and verification outputs into one structured object: actions are grouped by status, findings are carried forward, verification diffs are inserted, and final dataset-level counts are added. In other words, the **source of truth** is a typed factual record produced before any narrative generation begins.
+
+![Final report assembly: inputs, aggregation, FinalPipelineReport, narrative agent, and outputs](images/flow_diagrams/11_report_assembly.gv.png)
+
+Also, the narrative agents do not receive the raw pipeline state directly but  **briefing blocks derived from the structured report**. For example, the `narrative-frontmatter` agent is given a compact text document.
+
+```text
+DATASET: spesa
+TOTAL_ROWS_CLEANED: 7502
+VALIDATION_SUMMARY: {'schema_issues': 7, 'completeness_columns_with_missing': 14, 'consistency_findings': 6, 'anomaly_findings': 3, 'cross_column_findings': 2, 'duplicate_groups': 4}
+APPLIED_ACTIONS: 71
+DEFERRED_ACTIONS: 9
+FAILED_ACTIONS: 0
+NOT_NEEDED_ACTIONS: 0
+GENERATED_CLEANERS: 6
+ANOMALY_FINDINGS: 3
+CROSS_COLUMN_FINDINGS: 2
+DUPLICATE_GROUPS: 4
+VERIFICATION_SUMMARY: All targeted consistency findings were resolved or improved with no regressions.
+UNRESOLVED_RISKS: ['Anomaly findings remain review-only.']
+OVERALL_SUMMARY: Validation found 36 section-level findings/signals. Applied 71 remediation actions, left 9 proposed without auto-apply, recorded 0 failed actions, and dropped 41 exact duplicate row(s).
 ```
 
-#### Agent 1: `correction_suggester`
-**Tool used:** `generate_correction_suggestions`
+This means that the **narrative prose is grounded**, but it is not itself the d**eterministic layer**. Its structure is still enforced: the front matter must return a typed opening block, each section must return one typed section object, and the final narrative report is assembled from those validated pieces. The generated prose is therefore constrained by structured inputs and structured outputs, even though the wording itself is still model-generated. The reporting stage is best understood as **deterministic factual assembly first, structured narrative rendering second**.
 
-Parses the findings JSON and produces a prioritized list of fix recommendations:
+### 2.5 Design Choices and Prompt Strategy
 
-| Priority | Category | Examples |
-|---|---|---|
-| 1 | Remove | Drop >95% empty columns; drop duplicate columns/rows |
-| 2 | Rename/Restructure | Fix snake_case violations; convert hyphens to underscores |
-| 3 | Type coercion | Strip currency symbols; convert placeholders to NaN; normalise dates |
-| 4 | Impute/Fill | Fill numeric NaN with median; fill categorical NaN with 'Unknown' |
-| 5 | Standardise | Unify date formats; normalise casing; map rare categories to 'Other' |
-| 6 | Investigate | Near-duplicate rows; outliers; cross-column violations |
+**[Pydantic](https://docs.pydantic.dev/latest/)** and **[Pydantic AI](https://ai.pydantic.dev/)** were chosen because the system depends on strict **structured handoffs** between many stages. A **looser conversational orchestration framework** would have made **debugging and validation significantly harder**, because almost every stage in this pipeline must produce an artifact that can be inspected and reused by the next stage.
 
-#### Agent 2: `reliability_scorer`
-**Tool used:** `calculate_reliability_score`
+The **prompt strategy** follows the same engineering logic. The prompt is **not** treated as the component that performs the work by itself. Its role is to **delimit what the agent is allowed to do**: which evidence is authoritative, which decision it is being asked to make, which facts it must not invent, and which typed output it must return. In practice, the schema agent is asked to infer a cleaned dtype from bounded profiling evidence, the consistency agent is asked to judge whether an inconsistency is truly actionable, and the generator agent is asked to write one cleaning function that satisfies an explicit contract rather than improvising a free-form remediation plan. The purpose of the prompt is therefore to **bound the agent's role inside the pipeline**, not to replace the pipeline itself.
 
-Computes a 0–100 numeric score by applying deductions to a perfect 100. See [Scoring Formula](#scoring-formula).
-Presents the result as: Final Score → Deduction Breakdown → Score Improvement Roadmap → Expected Post-Fix Score.
+For example, a format-consistency call is framed as a **narrow decision over a structured attachment**, not as an open request to "clean the column." A shortened instruction block looks like this:
 
-#### After the subgraph completes (`call_remediation_team` in `graph.py`)
+```text
+You are the column-level Format Consistency agent.
+You receive a ColumnFormatFacts document for one column and must decide
+whether a format inconsistency exists and, if so, describe it precisely
+for the downstream cleaning agent.
 
-1. Copies `spesa_v3.csv` → `spesa_v4.csv` (final cleaned dataset)
-2. Builds a full `report` dict with all team findings
-3. Saves `data/quality_report.json`
-4. Calls `_build_markdown(report)` and saves `data/quality_report.md`
+Decision rules:
+- return finding = null if machine_format_candidate is false,
+  dominant_shape_pct is below threshold, or inconsistent_rows is 0
+- return finding = null for descriptive or free-text columns
+- only report a finding when there is a clear dominant format
+  and a measurable set of outliers that a cleaning function could fix
 
----
+When you report a finding:
+- expected_pattern must describe one canonical target format only
+- example_inconsistent_values must copy the provided outlier values verbatim
+- evidence must cite dominant_shape, dominant_shape_pct, inconsistent_rows,
+  and the target dtype
+- suggested_strategy must specify how each outlier shape should be transformed
+```
 
-## Tools Reference
+The important point is that the **prompt does not create the evidence**. The evidence has already been measured and packaged upstream. The prompt only tells the agent how to operate over that bounded evidence and what kind of output artifact it is allowed to produce.
 
-All `@tool`-decorated functions are callable by LLM agents via the ReAct pattern.
+The **prompt design** is also **intentionally token-conscious**. The **system generally does not send full raw columns to the model**. It sends **bounded profiles**, **capped samples**, **representative examples**, and **structured local facts**. This **reduces cost** and **encourages the model to reason over distilled evidence rather than over long noisy inputs**. The **code-execution capability** is enabled only for the `completeness-analysis` and `column-cleaner-generator` agents, and even there it is **bounded**. The system therefore uses tool execution as a narrow controlled capability rather than as a free-form sandbox. In particular, the cleaner generator may use sandboxed execution to test a candidate function on bounded examples, but this self-test is **not** the final acceptance criterion: the decisive authority remains the later **host-side validator**, which re-checks the returned code deterministically before any cleaner is trusted.
 
-| Tool | File | What it reads | What it returns |
-|---|---|---|---|
-| `validate_data_types` | `schema_tools.py` | CSV via pandas (dtype=str) | JSON: `{issues: {col: [message]}, total_rows, status}` |
-| `check_naming_conventions` | `schema_tools.py` | First 200 rows of CSV | JSON: `{naming_issues, duplicate_columns, status}` |
-| `detect_missing_values` | `completeness_tools.py` | CSV (placeholders → NaN) | JSON: `{missing_per_column, rows_with_any_null, total_rows, status}` |
-| `calculate_completeness_rate` | `completeness_tools.py` | CSV (placeholders → NaN) | JSON: `{completeness_per_column_pct, overall_completeness_pct}` |
-| `detect_sparse_columns` | `completeness_tools.py` | CSV (placeholders → NaN) | JSON: `{sparse_columns: {col: missing_pct}, threshold_pct}` |
-| `check_format_consistency` | `consistency_tools.py` | Full CSV (dtype=str) | JSON: `{period_cols, date_cols, issues, status}` |
-| `check_cross_column_logic` | `consistency_tools.py` | Full CSV (dtype=str) | JSON: `{issues: {col: {problem, count, examples}}, status}` |
-| `detect_duplicates` | `consistency_tools.py` | Full CSV (dtype=str) | JSON: `{issues: {exact_duplicates, near_duplicates_on_key_cols}, status}` |
-| `detect_numerical_outliers` | `anomaly_tools.py` | Full CSV (default dtypes) | JSON: `{numeric_columns_checked, findings: {col: {iqr_outliers, zscore_outliers}}}` |
-| `detect_categorical_anomalies` | `anomaly_tools.py` | Full CSV (dtype=str) | JSON: `{categorical_columns_detected, findings: {col: {rare_values, invalid_markers}}}` |
-| `generate_correction_suggestions` | `remediation_tools.py` | JSON string of all findings | JSON: `{correction_suggestions: [{field, issue, action}]}` |
-| `calculate_reliability_score` | `remediation_tools.py` | JSON string of all findings | JSON: `{reliability_score, grade, deductions, interpretation}` |
+Another important design choice is the default use of **`temperature = 0`** for the main operational agents in `src/core/agents.py`, including schema inference, completeness analysis, format consistency, and cleaner generation. The reason is not that the outputs become literally mathematically deterministic in every circumstance, but that the system wants them to be **as stable and reproducible as possible** when the same bounded evidence is presented again. In this project, unnecessary variation is usually harmful: a small gratuitous change in inferred dtype, cleaning rationale, or branch structure can propagate downstream into validation mismatches, different remediation decisions, or harder-to-debug retry behavior. For that reason, the default prompt configuration is deliberately conservative. Only when the cleaning loop detects **stagnation** does the system intentionally relax that setting and raise temperature to encourage a meaningfully different repair attempt.
 
-### Path resolution safety net
+## 3. Experimental Design
 
-`consistency_tools.py` and `anomaly_tools.py` include a `_resolve_csv_path()` helper. If the LLM passes a slightly hallucinated filename (e.g., `spesa_v2.2.csv` instead of `spesa_v2.csv`), the helper:
-1. Strips decimal sub-version suffixes: `spesa_v2.2` → `spesa_v2`
-2. Falls back to the most-recently-modified CSV in the same directory matching the base name
+The main purpose of the project was not only to build a data-cleaning pipeline, but to understand which **architectural choices** make LLM-assisted cleaning reliable enough to be useful on heterogeneous real tabular data. In practice, the project evolved through a **trial-and-error process** in which several initial designs were found to be too expensive, too brittle, or too difficult to validate, and were then replaced by more constrained alternatives.
 
----
+More specifically, the experiments were used to validate the target contribution of the project: a staged pipeline in which **local deterministic analysis**, **bounded agent reasoning**, **constrained code generation**, **host-side validation**, and **post-application verification** are combined so that cleaning decisions are both affordable and auditable. The final system should therefore be read not as a single model prompt, but as the result of iterative experimentation on how to distribute work between local code and LLM agents.
 
-## Fix Functions Reference
+### 3.1 From Full-Column Prompting to Bounded Profiling
 
-Fix functions are **not** callable by LLM agents. They are plain Python called directly by graph node wrappers in `graph.py` after a team's subgraph completes. They are fully deterministic — no LLM involved.
+The first experiment addressed the **cost** and **scalability** of schema and format inference. An early design gave the model entire raw columns, but this quickly produced very large prompts and **unsustainable token usage** on realistic datasets. The adopted solution was to replace that approach with a **mixed strategy**: the agent receives a random sample of up to 5% of dataset rows, capped at 500 unique non-null values per column where appropriate, combined with full-column deterministic statistics computed locally.
 
-| Function | File | Input → Output |
-|---|---|---|
-| `apply_schema_fixes(in, out, profile)` | `schema_tools.py` | original CSV → `_v1.csv` |
-| `apply_completeness_fixes(in, out, profile)` | `completeness_tools.py` | `_v1.csv` → `_v2.csv` |
-| `apply_consistency_fixes(in, out)` | `consistency_tools.py` | `_v2.csv` → `_v3.csv` |
-| `build_final_report(...)` | `remediation_tools.py` | all findings dicts → report dict |
+- **Main Purpose**: determine whether the system could preserve useful semantic inference while drastically reducing prompt size.
+- **Baseline**: the baseline was the earliest full-column prompting strategy, in which the model received much larger portions of raw column content directly. 
+- **Evaluation metrics**: the main evaluation criteria were **token consumption**, **prompt compactness**, and whether the agent still produced **useful schema and format interpretations**. These metrics were appropriate because the objective of this experiment was not to maximize raw recall over every column value, but to make LLM reasoning affordable while preserving enough evidence to infer the intended semantic type and dominant format of a column.
+- **Resulting design decision**: this experiment led to one of the central design choices of the final system: the LLM is not given full columns when the task is **conceptual inference**. Instead, the system provides bounded representative evidence, while local code computes global statistics over the entire dataset. This division of labor reduced cost and made the pipeline feasible on larger datasets.
 
----
+### 3.2 From Direct Cleaning to Example-Guided Code Generation
 
-## Scoring Formula
+The second experiment asked whether the **cleaning stage** should reason over broader raw column contents or instead generate **executable code** from a **compact contract**. The adopted solution was the latter: construct a `ColumnCleaningRequest` containing the **target format**, **dominant valid examples**, **representative inconsistent examples**, and **explicit preservation requirements**, and then generate one self-contained Python function from that request.
 
-The reliability score starts at **100** and deductions are subtracted. Per-column deductions are scaled by `col_scale = min(10 / column_count, 1.0)` so wide datasets are not over-penalised.
+- **Main Purpose**: determine whether the cleaning stage could become more reproducible, inspectable, and reusable by generating executable code from a narrow contract instead of from a broader and more open-ended prompt.
+- **Baseline**: the baseline was a less structured design in which the model was given broader raw evidence and a more open-ended cleaning task.
+- **Evaluation metrics**: the most relevant metrics were **cleaner acceptance rate**, **number of validation failures**, and whether **already-valid values were preserved**. These metrics were appropriate because the main risk was not simply failure to transform outliers, but accidental damage to values that were already correct.
+- **Resulting design decision**: this experiment led to a **cleaner-generation process** in which the LLM sees only **distilled examples** and **structural instructions**, not the whole column. The generated code is then **host-validated locally** on representative valid and inconsistent examples before it is accepted for application. This makes the generation stage **cheaper**, **more inspectable**, and more compatible with **explicit correctness checks**.
 
-| Dimension | Deduction logic | Cap |
-|---|---|---|
-| **Schema** | −3 pts × type issues (scaled) + −1 pt × naming/duplicate issues (scaled) | −20 pts |
-| **Completeness** | −(100 − overall_completeness_pct) × 0.5 | none |
-| **Consistency** | −3 pts × format issues (scaled); −5 pts for any cross-column violations; −min(duplicate_count/100, 10) | varies |
-| **Anomaly** | −min(outlier_count/50, 10) per column with IQR outliers | −10 pts/col |
+### 3.3 From One-Shot Generation to Validator and Critic Loops
 
-**Grade thresholds:**
+The third experiment was motivated by a recurring **development problem**: **one-shot code generation** often produced cleaners that looked plausible but still failed operationally. The improved design was to **validate generated code locally after each attempt** and, when issues were found, pass the **authoritative validation failures** to a **repair critic** that guides the next attempt.
 
-| Grade | Score range |
+- **Main Purpose**: determine whether an explicit host-side validator and repair loop would improve reliability compared with simply accepting or rejecting one-shot generations.
+- **Baseline**: the baseline was one-shot generation without a structured repair process.
+- **Evaluation metrics**: the main metrics were **first-pass acceptance rate**, **total retry count**, **frequency of repeated failure patterns**, and the **verification outcome after application**. These metrics were appropriate because they capture both engineering efficiency and behavioral quality: a cleaner that compiles but repeatedly fails preservation or formatting constraints is not useful, and a cleaner that appears valid but does not improve the final dataset is also not a success.
+- **Resulting design decision**: this experiment produced the **generation-validation-critic loop** implemented in the codebase. It also motivated the **stagnation-control logic**: when retries keep reproducing essentially the same failure, the system injects a **structural unblock brief** and adjusts the **temperature conservatively** rather than repeating the same attempt indefinitely.
+
+### 3.4 From Cleaning Acceptance to Post-Application Verification
+
+The fourth experiment asked whether **local acceptance on representative examples** was sufficient to trust a cleaner, or whether the **cleaned dataset** still needed to be **re-evaluated after full-column execution**. The adopted solution was to apply accepted cleaners to the real dataset and then **re-run consistency checks** on the cleaned output to compare **before-versus-after findings**.
+
+- **Main Purpose**: validate the decision to include a separate verification stage rather than treating local example-based acceptance as final success.
+- **Baseline**: the baseline was the implicit assumption that a cleaner passing local example-based validation could be treated as successful.
+- **Evaluation metrics**: the main metrics were verification outcomes classified as **resolved**, **improved**, **unchanged**, or **regressed**. These metrics were appropriate because they directly measure the target contribution of the project: not merely generating code, but producing measurable improvements in data quality without introducing regressions.
+- **Resulting design decision**: this experiment confirmed that **acceptance at the code level** should not be treated as **final success**. In the implemented pipeline, the true success criterion is **post-application verification** on the cleaned dataset, not just a plausible generated function.
+
+### 3.5 Summary of the Experimental Logic and Important Design Decisions Shaped by Trial and Error
+Several additional decisions in the final system were also motivated by **observed failure modes** during development.
+
+1. The system moved toward **richer cleaning requests** because simpler pattern descriptions were not sufficient to protect **already-valid values**. In particular, **datetime-like** and **period-like columns** required **explicit dominant examples**, **target shape expectations**, and **recovery rules** for partially informative values. Without this richer contract, the generator could normalize outliers while damaging valid entries.
+2. **Duplicate handling** became more **explicit** and **deterministic** over time. **Exact duplicate rows and columns** were separated from more ambiguous **near-duplicate** or **semantic-conflict** cases, allowing the system to auto-apply only the **lowest-risk actions** while leaving ambiguous situations for **manual review**.
+3. The system adopted a stronger separation between **factual reporting** and **narrative reporting**. This decision emerged from the need to keep final claims grounded in **structured artifacts** rather than letting **free-form text** become the primary source of truth. The final narrative is therefore generated only after the factual `FinalPipelineReport` has already been assembled.
+
+Taken together, these experiments do not represent a **classical benchmark-only evaluation**. Instead, they document the **iterative process** through which the project's final contribution emerged: a **token-conscious**, **safety-oriented**, **auditable** LLM cleaning pipeline whose architecture was refined in response to concrete **cost**, **reliability**, and **validation** problems observed during development.
+
+## 4. Results
+
+The quantitative illustrations reported in this section are drawn from the cached end-to-end run on **`spesa.csv`**, because this dataset provides the clearest basis for visual and metric-based discussion. Comparable remediation behavior was obtained across the project datasets, but `spesa.csv` is used here as the most readable case for showing how the pipeline behaves when diagnosis, controlled intervention, and post-application verification are considered together.
+
+### 4.1 Changes Applied
+
+The most important pattern is the gap between what the pipeline can detect and what it is willing to change automatically. The counts below indicate that diagnosis is deliberately broader than intervention: findings are accumulated aggressively, but execution remains selective.
+
+![Pipeline counts that summarize what was found and what was executed](images/findings/03_pipeline_counts.png)
+
+This asymmetry reflects a **safety-first policy** rather than a coverage failure. The **left panel** is visually dominated by **duplicate groups (65)**, while the other finding families are much smaller: **8 schema issues**, **9 columns with missingness**, and **6 findings each** for format consistency, anomalies, and cross-column checks. The **right panel** shows the same selectivity from the remediation side: **71 applied actions**, **34 proposed-but-not-applied actions**, **31 manual-review items**, **6 accepted cleaners**, and only **1 failed action**. A useful question here is why the duplicate signal is so much larger than the others. The answer is that duplicate handling is allowed to surface both **row-level** and **column-level** redundancy broadly, whereas automatic cleaning remains much narrower and is reserved for cases where the normalization target is explicit and verifiable.
+
+That **65-group duplicate signal** is itself internally structured. Of those groups, **41** are **exact row duplicates** after whitespace and case normalization, while **24** are **near-duplicate row groups** that share the same key columns but differ elsewhere in the record. Importantly, these counts do **not** include duplicate columns: column-level duplication is tracked separately through actions such as `drop_exact_duplicate_column`.
+
+One concrete case visible in the action counts is the handling of **`cod imposta ext`**. That column was found to be an **exact duplicate** of **`2cod_imposta`** with **100% similarity**, so the remediation plan correctly scheduled a `drop_exact_duplicate_column` action and the duplicate column was removed. A separate rename action for `cod imposta ext -> cod_imposta_ext` had also been planned earlier by the schema stage, but by the time the rename step executed, the column had already been dropped as a duplicate. The rename was therefore recorded as **failed**, but this is a **benign sequencing artifact** rather than a real remediation failure: the correct outcome was that the duplicate column no longer existed.
+
+The **34 proposed-but-not-applied actions** also become easier to interpret once they are unpacked. They consist of **31 `manual_review` actions** and **3 `report_only` actions**. More specifically, the manual-review queue contains **24** duplicate-detection cases, **5** cross-column validation cases, and **2** anomaly cases. The three `report_only` actions come from anomaly detection. This breakdown reinforces the same design logic visible in the figure: the pipeline is willing to **surface many risks**, but it auto-applies only the subset for which a safe intervention rule is already available.
+
+The second pattern is that the strongest verified improvements concentrate on a narrow subset of columns rather than spreading evenly across the dataset. The impact clusters where the data exhibit repetitive and format-like irregularities that can be described through a stable target representation and then checked again after cleaning.
+
+![Verified format inconsistencies eliminated by cleaning, by column](images/findings/04_verification_outcomes.png)
+
+This concentration is informative because it reveals where the architecture is strongest. The chart is driven above all by **`aggregation-time` (602 rows eliminated)** and **`rata` (510)**, with a second tier formed by **`spesa`** and **`SPESA TOTALE`** at **168 each**, while **`ente` (20)** and **`cod_imposta` (19)** are much smaller cleanups. All six bars end at **zero residual inconsistent rows**, so the image is not just showing that something improved, but that the pipeline completely resolved the targeted inconsistency families it decided to clean. This is exactly the kind of column profile for which the architecture is strongest: once the validation layer can define a **narrow normalization objective**, cleaner generation becomes both more reliable and more verifiable.
+
+The dataset-level comparison confirms the same pattern from a broader perspective. The strongest changes occur in defects for which the system can impose a canonical representation without introducing new semantic assumptions.
+
+![Raw vs cleaned table-level quality signals](images/findings/01_quality_signals.png)
+
+This image makes that point very concretely: the two resolved table-level signals are **41 duplicate rows dropped** and **6 unsafe column names fixed**. In other words, the visible gains at this level are not vague quality improvements, but very specific corrections to **redundancy** and **schema hygiene**. This pattern suggests that the pipeline is most effective when the defect is **technical rather than epistemic**. Duplicate removal, naming normalization, and tightly scoped format repairs respond well to explicit rules or to validation-guided cleaner generation because the target state is narrow and observable.
+
+The placeholder analysis reinforces the same conclusion from a different angle. The cleaned dataset does not become dramatically more complete in aggregate because the pipeline does not fabricate missing information; instead, it standardizes how absence is represented and avoids collapsing every suspicious token into null when preservation is uncertain.
+
+![Placeholder-like values converted to proper nulls, by column](images/findings/02_placeholder_substitution.png)
+
+The column distribution is also informative. The largest substitutions occur in **`descrizione` (210)**, **`imposta` (175)**, **`ente` (135)**, and **`cod_imposta` (108)**, with smaller but still visible conversions in **`spesa`** and **`SPESA TOTALE`** at **59 each**. So the image does not suggest a diffuse blanket conversion policy; it shows a few columns carrying most of the placeholder cleanup burden. The implication is that a small movement in global missing-like counts should not be read as weak performance. In this setting, **representational coherence** is more meaningful than a large cosmetic decrease in missingness metrics, and the trade-off again favors **conservative interpretation** over **aggressive alteration**.
+
+The same safety-first policy appears in anomaly handling. Extreme numeric values, rare labels, and negative values in otherwise non-negative measures are surfaced as review findings rather than being rewritten automatically, so anomaly detection broadens visibility without overreaching into unsafe remediation.
+
+![Anomaly findings flagged for review](images/findings/05_anomaly_detection.png)
+
+Here too, the image is highly concentrated rather than diffuse. The two dominant anomaly bars are **high-severity numeric outliers** in **`spesa` (1101 rows)** and **`SPESA TOTALE` (1098 rows)**. The remaining findings are much smaller: **11 negative values** in `spesa`, **6 rare-category rows** in `tipo_imposta`, and **5 negative values** in `SPESA TOTALE`. The close symmetry between `spesa` and `SPESA TOTALE` is not accidental: they carry essentially the **same extreme values** and behave like **functionally duplicate measures**, which is also consistent with the fact that the cleaning stage changed **227 rows** in each column independently.
+
+A useful interpretive question is whether those two very large outlier signals should have triggered automatic cleaning. The design answer is **no**. The large positive values are plausible as **budget-level expenditure figures**, while the negative values are certainly more suspicious but still not safe to rewrite automatically without domain knowledge about legitimate reversals, adjustments, or compensations. For that reason, the pipeline correctly keeps these findings in the **review-only** layer: it treats them as **meaningfully ambiguous numeric extremes**, not as straightforward formatting defects.
+
+### 4.2 Token Usage and System Costs
+
+At the **run level**, the first thing to notice is the **overall token and cost profile**: the total usage remains modest and the cost is well below one dollar, even though the system performs multiple reasoning and generation steps over a real dataset. The dashboards show that the heavier model expenditure is concentrated in a limited portion of the workflow rather than spread uniformly across all stages.
+
+| Token dashboard | Cost dashboard |
 |---|---|
-| A | ≥ 90 |
-| B | ≥ 75 |
-| C | ≥ 60 |
-| D | ≥ 45 |
-| F | < 45 |
+| ![Logfire token totals by model and by type](images/logfire/03_token_dashboard.png) | ![Logfire model cost dashboard](images/logfire/04_agents_dashboard.png) |
 
-Score floors at 0.
+These dashboards clarify why the total cost remains analytically relevant even though it is modest in absolute terms. The key point is not only that the observed run cost is about **$0.0704**, but that the run-level profile does **not** show a flat accumulation of cost across the whole pipeline. Instead, it shows a design in which model usage stays controlled until the workflow reaches the stages where semantic reasoning is genuinely required. The architecture makes that feasible because expensive calls are reserved for **narrow, information-dense tasks** rather than for indiscriminate full-dataset prompting. Cost efficiency is therefore produced by **architectural filtering**: deterministic stages absorb the bulk of raw inspection work, and the model is invoked only after the search space has already been compressed into actionable questions.
 
----
+![Logfire agent activity cards](images/logfire/05_agents_costs_tokens.jpeg)
 
-## Output Files
+At the **per-agent level**, the division of cost reinforces the same interpretation. The **`column-cleaner-generator`** is the dominant cost center at about **$0.03** over **10 runs**, which means that the main budget is spent where the system performs the most difficult task: **synthesizing executable repairs under preservation constraints**. The **`narrative-section`** agent is the next visible recurring contributor at about **$0.01**, while the **`cleaner-repair-critic`** remains below **$0.01** despite multiple calls, indicating that diagnosis is cheaper than generation. The remaining validation and summary agents are individually negligible. The image therefore makes a useful architectural point: the pipeline does **not** spend money evenly across all stages, but concentrates spending where **semantic reasoning** and **code synthesis** are genuinely necessary while keeping descriptive and diagnostic support comparatively light.
 
-For a dataset named `spesa.csv`, after a successful run:
+This cost profile is consistent with the system design. Deterministic validators do not consume LLM budget at all, because they are local Python stages that inspect data and apply explicit rules. The expensive part begins only when the system asks the model to synthesize executable repairs that must preserve already-valid values and then survive host-side checks. The trade-off is therefore not between low cost and high capability in the abstract, but between a narrowly targeted use of a powerful model and a much less disciplined architecture that would have allowed token usage to scale with raw data exposure instead of with validated cleaning opportunities.
 
-| File | Contents |
-|---|---|
-| `data/spesa_v1.csv` | After schema fixes (dedup columns, type coercion, renames) |
-| `data/spesa_v2.csv` | After completeness fixes (null fill, sparse column drop) |
-| `data/spesa_v3.csv` | After consistency fixes (date normalisation, duplicate row removal) |
-| `data/spesa_v4.csv` | Final dataset (copy of v3, for auditability) |
-| `data/quality_report.json` | Machine-readable report: all findings + score + suggestions |
-| `data/quality_report.md` | Human-readable Markdown report with tables and executive summary |
+### 4.3 Time Distribution of Model Activity
 
----
+The temporal trace indicates that the system remains fast in wall-clock terms even though its exact runtime is not fully deterministic. What stands out is the clustering of activity: the early validation and summary agents complete quickly, while the longer delays accumulate only once the pipeline reaches cleaner generation and, in some cases, re-enters the repair cycle. This pattern is expected, because the system spends very little time deciding whether an issue exists and more time when it must produce a safe executable correction.
 
-## File Structure
+![Logfire trace of individual calls and durations](images/logfire/07_agents_calls.png)
 
-```
-ML_MiSoMa_reply2026/
-├── main.py                          # CLI entry point (argparse, UTF-8 output fix)
-├── requirements.txt
-├── .env                             # GOOGLE_API_KEY (not committed)
-│
-├── data/
-│   ├── spesa.csv                    # original dataset
-│   ├── spesa_v1.csv                 # post-schema
-│   ├── spesa_v2.csv                 # post-completeness
-│   ├── spesa_v3.csv                 # post-consistency
-│   ├── spesa_v4.csv                 # final
-│   ├── quality_report.json
-│   └── quality_report.md
-│
-└── data_quality/
-    ├── __init__.py
-    ├── config.py                    # LLM factory + GOOGLE_API_KEY + PLACEHOLDER_VALUES
-    ├── state.py                     # DataQualityState, TeamState
-    ├── graph.py                     # top supervisor + team node wrappers + report builder
-    │
-    ├── teams/
-    │   ├── schema_team.py           # 2 workers, fixed edges
-    │   ├── completeness_team.py     # 3 workers, fixed edges
-    │   ├── consistency_team.py      # 3 workers + LLM supervisor
-    │   ├── anomaly_team.py          # 2 workers + LLM supervisor
-    │   └── remediation_team.py      # 2 workers, fixed edges
-    │
-    └── tools/
-        ├── schema_tools.py          # validate_data_types, check_naming_conventions, apply_schema_fixes
-        ├── completeness_tools.py    # detect_missing_values, calculate_completeness_rate,
-        │                            # detect_sparse_columns, apply_completeness_fixes
-        ├── consistency_tools.py     # check_format_consistency, check_cross_column_logic,
-        │                            # detect_duplicates, apply_consistency_fixes
-        ├── anomaly_tools.py         # detect_numerical_outliers, detect_categorical_anomalies
-        └── remediation_tools.py     # generate_correction_suggestions, calculate_reliability_score,
-                                     # build_final_report
-```
+The same trace also suggests that retry variability does not expand into uncontrolled latency. The system supports bounded parallel workers for independent column-level agent tasks, so runtime is influenced less by the sum of all per-column calls than by the slowest active branch in a stage. The implication is that the system gains speed through orchestration rather than through simplification: it does not remove the critic loop or the verification logic in order to appear fast, but contains their time cost by overlapping independent work where the architecture allows it. The trade-off is that exact runtime can fluctuate from run to run when different columns trigger different numbers of retries, yet the overall process remains fast enough to be operationally plausible because concurrency prevents that variability from compounding linearly.
 
----
+### 4.4 Summary of Run Outcomes
 
-## LLM Configuration
+The table below consolidates the quantitative outcomes of the end-to-end run on `spesa.csv`, extracted from the cached pipeline artifacts.
 
-**File:** `data_quality/config.py`
+| Metric | Value |
+|--------|-------|
+| Raw rows | 7,543 |
+| Cleaned rows | 7,502 |
+| Raw missing-like cells | 17,811 |
+| Cleaned missing-like cells | 17,752 |
+| Raw exact duplicate rows | 41 |
+| Cleaned exact duplicate rows | 0 |
+| Accepted cleaners | 6 |
+| Rows changed by cleaners | 1,848 |
+| Targeted inconsistent rows before cleaning | 1,487 |
+| Targeted inconsistent rows after cleaning | 0 |
+| Overall reduction on targeted inconsistencies | 100.00% |
+| Applied actions | 71 |
 
-| Setting | Value |
-|---|---|
-| Model | `gemini-3.1-flash-lite-preview` via `langchain-google-genai` |
-| Temperature | `0` (deterministic routing and structured output) |
-| API key source | `GOOGLE_API_KEY` env var or `.env` file |
+The reduction from **1,487 targeted inconsistent rows to 0** should be read together with the conservative intervention policy described in Section 4.1: auto-application is restricted to findings where the normalization target is unambiguous and verifiable. It is also important to distinguish this metric from the broader **rows changed by cleaners** measure. The current cached artifacts show that the **6 accepted cleaners** changed **1,848 rows in total**, whereas **1,487** refers specifically to the rows counted as targeted inconsistencies before verification. The difference is meaningful: cleaner activity is broader than the narrower before/after inconsistency count used in the verification figure.
 
-All 5 teams and the top supervisor share the same `get_llm()` factory. The LLM serves two roles:
+The concentration of that cleaning impact is also informative. A small number of columns carry most of the burden: **`aggregation-time` (602 rows)** and **`rata` (510)** together already account for the majority of the eliminated inconsistencies, while **`spesa`** and **`SPESA TOTALE`** each contribute **227 changed rows**. This explains why only **6 cleaners** were enough to remove such a large number of inconsistent values: the problem is not uniformly distributed across the dataset, but concentrated in a few **high-impact format-variant columns**.
 
-1. **Structured output routing** — `llm.with_structured_output(Router)` returns a single `next` field; used by the top supervisor and the consistency/anomaly team supervisors.
-2. **ReAct agents** — `create_react_agent(llm, tools=[...], prompt=...)` — each worker reasons about the task, calls its tool once, interprets the JSON result, and writes a natural-language findings report.
+The modest decrease in missing-like cells (**17,811 to 17,752**) reflects the same conservatism: the pipeline standardizes how absence is represented rather than fabricating fill values. The row count reduction from **7,543 to 7,502** is explained entirely by **exact duplicate removal**.
 
-Fix functions, path resolution helpers, and report builders are **pure Python** — the LLM is never involved in data modification.
+## 5. Conclusions
+
+### 5.1 Main Takeaway
+
+The main conclusion supported by the quantitative figures is that the system does not merely propose a careful multi-agent architecture in the abstract, but demonstrates a **specific operational pattern**: it applies automation aggressively only where the target is narrow, verifiable, and low-risk, while leaving semantically ambiguous cases in the **review layer**. In the cached `spesa.csv` run, the pipeline accepted **6 cleaners**, applied **71 actions**, changed **1,848 rows** through those accepted cleaners, and reduced the targeted format inconsistencies from **1,487 rows to 0**, yielding a **100% reduction** on the inconsistency families it explicitly chose to remediate.
+
+The shape of that improvement is also important. Most of the impact is concentrated in a few **high-burden format columns**, especially **`aggregation-time` (602 inconsistent rows resolved)** and **`rata` (510)**, with additional contributions from **`spesa`**, **`SPESA TOTALE`**, **`ente`**, and **`cod_imposta`**. At the same time, anomaly-heavy columns such as `spesa` and `SPESA TOTALE` remained **review-only**, and the duplicate signal remained broad because the system deliberately distinguishes between **safe structural removals** and **ambiguous semantic conflicts**. The result is not a claim of universal autonomous cleaning. It is evidence that **agentic reasoning can be integrated into a safety-oriented public-data workflow** in which both **data-quality impact** and **execution behavior** remain inspectable, with the total model cost for the observed run remaining modest at about **$0.0704**.
+
+### 5.2 Observed Failure Modes
+
+Several **concrete failure modes** emerged during development and shaped the final architecture. One recurring problem was the accidental damage of **already-valid values** by generic cleaning branches that matched broad string patterns before checking whether the input was already canonical. Another was the generation of values with the correct delimiter but the **wrong semantic order**, especially in date-like fields. Recoverable period encodings could also be dropped too aggressively if the logic treated partial information as unusable. At the code level, some generated cleaners failed because they were not truly **self-contained**. Finally, repeated local failure loops showed that generation quality does not automatically improve by simple repetition.
+
+These failure modes are significant because they justify several safeguards that might otherwise appear overly cautious. The **early-exit preservation rule**, **host-side validation**, **repair-critic loop**, and **stagnation detector** all exist because specific classes of failure were encountered in practice, not because the architecture is trying to be cautious in the abstract.
+
+### 5.3 Limitations
+
+The current system still has important limitations, many of which are **deliberate design constraints** rather than accidental gaps. Some intervention classes, especially **anomaly handling** and **near-duplicate row cases**, remain conservative and may require manual review rather than automated correction. The system is therefore **not** a universal autonomous cleaner for arbitrary datasets, nor is it intended to be interpreted as such.
+
+Another limitation concerns scope. The system is optimized for **structured tabular validation** and **controlled normalization**, not for domain-complete semantic correction. If a value is syntactically valid but factually wrong in a way that requires external business knowledge, the current architecture may flag it as suspicious at best, but it will not necessarily be able to repair it safely.
+
+A further limitation is that the pipeline **does not reason about logical relationships between columns**. Cross-column checks (Section 2.4.6) apply explicit programmatic rules such as year-month-period consistency and date-order violations, but they do not capture domain-level logical constraints between arbitrary column pairs. An inconsistency that only becomes visible when the semantics of two columns are interpreted jointly - for example, a combination of category and amount that is internally contradictory - will not be detected unless a dedicated rule is defined.
+
+Finally, the system has **limited effectiveness on free-text and general-purpose text columns**. The schema stage can classify a column as `free_text` and the anomaly stage can flag statistical outliers, but neither stage attempts to normalize or validate the content of narrative fields. Columns whose values are prose descriptions, names, or open-ended categorizations are deliberately excluded from most cleaning logic, because there is no stable canonical form against which to validate them.
+
+### 5.4 Future Work
+
+Several natural extensions follow from the present implementation. Additional work could compare different stagnation-breaking strategies, alternative model choices, stronger duplicate-resolution policies, or richer verification criteria beyond format consistency alone.
+
+From a broader engineering perspective, future implementations could also expand the system toward a more configurable policy layer in which different intervention tolerances can be selected depending on the dataset context. That would allow the same architecture to remain conservative in high-risk scenarios while being more permissive in exploratory settings. Another direction would be to integrate a more explicit **human-in-the-loop** component, in which the system surfaces findings and proposed repairs to a user interface for review and approval before application. That would make the pipeline more interactive and allow it to benefit from human judgment on ambiguous cases.
+
