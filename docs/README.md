@@ -13,8 +13,3 @@ This documentation expands the [project README](../README.md). Start there to in
 
 The [presentation PDF](../ReplyProject.pdf) remains at the repository root. Experimental figures and example artifacts are retained from the original project report; they are not new measurements of the current checkout.
 
-## Editing and Wiki publication
-
-Edit documentation in `docs/` and update images in `images/`. Keep the README focused on the project introduction, architecture, and startup instructions. Check relative links whenever moving a section or image, and distinguish historical findings from current implementation behavior.
-
-The intended publication model is one-way synchronization from `docs/` to the GitHub Wiki when documentation reaches the repository's default branch. This automation is not active yet. Wiki availability, existing pages, and publishing credentials must be checked before enabling it. Once enabled, direct edits to generated Wiki pages may be overwritten; changes should be made here instead.
