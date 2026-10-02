@@ -11,5 +11,3 @@ This documentation expands the [project README](../README.md). Start there to in
 | [Experiments and results](experiments-and-results.md) | Development iterations and historical cached-run measurements |
 | [Limitations and future work](limitations-and-future-work.md) | Failure modes, limits of the approach, and planned improvements |
 
-The [presentation PDF](../ReplyProject.pdf) remains at the repository root. Experimental figures and example artifacts are retained from the original project report; they are not new measurements of the current checkout.
-
